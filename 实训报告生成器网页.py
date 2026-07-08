@@ -14,16 +14,15 @@ import re
 import sys
 import threading
 import uuid
-import warnings
 import webbrowser
+from dataclasses import dataclass, field
+from email import policy
+from email.parser import BytesParser
 from http import HTTPStatus
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
-
-warnings.filterwarnings("ignore", category=DeprecationWarning)
-import cgi
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -35,6 +34,31 @@ OUTPUT_DIR = CACHE_DIR / "outputs"
 
 JOBS: dict[str, tuple[Path, str]] = {}
 CORE = None
+
+
+@dataclass
+class UploadedFile:
+    filename: str
+    data: bytes
+
+
+@dataclass
+class MultipartForm:
+    fields: dict[str, list[str]] = field(default_factory=dict)
+    files: dict[str, list[UploadedFile]] = field(default_factory=dict)
+
+    def add_field(self, name: str, value: str) -> None:
+        self.fields.setdefault(name, []).append(value)
+
+    def add_file(self, name: str, uploaded_file: UploadedFile) -> None:
+        self.files.setdefault(name, []).append(uploaded_file)
+
+    def getfirst(self, name: str, default: str = "") -> str:
+        values = self.fields.get(name)
+        return values[0] if values else default
+
+    def get_files(self, name: str) -> list[UploadedFile]:
+        return self.files.get(name, [])
 
 
 def main() -> int:
@@ -120,14 +144,8 @@ class ReportWebHandler(BaseHTTPRequestHandler):
             if "multipart/form-data" not in content_type:
                 raise ValueError("请使用网页表单上传 TXT 文件。")
 
-            form = cgi.FieldStorage(
-                fp=self.rfile,
-                headers=self.headers,
-                environ={
-                    "REQUEST_METHOD": "POST",
-                    "CONTENT_TYPE": content_type,
-                },
-            )
+            content_length = int(self.headers.get("Content-Length", "0") or "0")
+            form = parse_multipart_form(content_type, self.rfile.read(content_length))
             uploaded_paths = save_uploaded_txt_files(form)
             output_name = build_output_name(form)
             output_path = unique_path(OUTPUT_DIR / output_name)
@@ -199,22 +217,55 @@ class ReportWebHandler(BaseHTTPRequestHandler):
         safe_log("%s - %s" % (self.address_string(), format % args))
 
 
-def save_uploaded_txt_files(form: cgi.FieldStorage) -> list[Path]:
-    file_fields = form["notes"] if "notes" in form else []
-    if not isinstance(file_fields, list):
-        file_fields = [file_fields]
+def parse_multipart_form(content_type: str, body: bytes) -> MultipartForm:
+    if not body:
+        raise ValueError("上传表单内容为空，请重新选择 TXT 文件。")
+
+    message_bytes = (
+        f"Content-Type: {content_type}\r\n"
+        "MIME-Version: 1.0\r\n"
+        "\r\n"
+    ).encode("utf-8") + body
+    message = BytesParser(policy=policy.default).parsebytes(message_bytes)
+    if not message.is_multipart():
+        raise ValueError("上传表单格式不正确，请刷新网页后重试。")
+
+    form = MultipartForm()
+    for part in message.iter_parts():
+        if part.get_content_maintype() == "multipart":
+            continue
+        disposition = part.get("Content-Disposition", "")
+        if "form-data" not in disposition:
+            continue
+        name = part.get_param("name", header="content-disposition")
+        if not name:
+            continue
+
+        payload = part.get_payload(decode=True) or b""
+        filename = part.get_filename()
+        if filename:
+            form.add_file(name, UploadedFile(filename=filename, data=payload))
+            continue
+
+        charset = part.get_content_charset() or "utf-8"
+        form.add_field(name, payload.decode(charset, errors="replace").strip())
+    return form
+
+
+def save_uploaded_txt_files(form: MultipartForm) -> list[Path]:
+    file_fields = form.get_files("notes")
 
     job_folder = UPLOAD_DIR / uuid.uuid4().hex
     job_folder.mkdir(parents=True, exist_ok=True)
     saved: list[Path] = []
     for index, field in enumerate(file_fields, start=1):
-        if not getattr(field, "filename", ""):
+        if not field.filename:
             continue
         original_name = safe_filename(field.filename)
         if Path(original_name).suffix.lower() != ".txt":
             raise ValueError(f"只能上传 TXT 文件：{original_name}")
         target = unique_path(job_folder / original_name)
-        data = field.file.read()
+        data = field.data
         if not data:
             raise ValueError(f"TXT 文件内容为空：{original_name}")
         target.write_bytes(data)
@@ -226,7 +277,7 @@ def save_uploaded_txt_files(form: cgi.FieldStorage) -> list[Path]:
     return saved
 
 
-def generate_report(form: cgi.FieldStorage, sources: list[Path], output_path: Path) -> tuple[int, list[str]]:
+def generate_report(form: MultipartForm, sources: list[Path], output_path: Path) -> tuple[int, list[str]]:
     core = load_core()
     core.clear_generation_warnings()
     template_path = core.resolve_template(get_form_value(form, "templatePath") or None)
@@ -276,7 +327,7 @@ def generate_report(form: cgi.FieldStorage, sources: list[Path], output_path: Pa
     return len(source_groups), core.get_generation_warnings()
 
 
-def build_output_name(form: cgi.FieldStorage) -> str:
+def build_output_name(form: MultipartForm) -> str:
     explicit = get_form_value(form, "outputName")
     if explicit:
         name = safe_filename(explicit)
@@ -292,14 +343,12 @@ def build_output_name(form: cgi.FieldStorage) -> str:
     return f"实训报告_{uuid.uuid4().hex[:8]}.docx"
 
 
-def get_form_value(form: cgi.FieldStorage, key: str) -> str:
-    if key not in form:
-        return ""
+def get_form_value(form: MultipartForm, key: str) -> str:
     value = form.getfirst(key, "")
     return str(value).strip()
 
 
-def get_bool(form: cgi.FieldStorage, key: str) -> bool:
+def get_bool(form: MultipartForm, key: str) -> bool:
     return get_form_value(form, key).lower() in {"1", "true", "yes", "on"}
 
 

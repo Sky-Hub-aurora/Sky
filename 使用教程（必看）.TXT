@@ -81,6 +81,8 @@ Windows 用户推荐直接双击：
 
 启动实训报告网页.bat
 
+这个 bat 会先自动安装 requirements.txt 里的依赖，再启动网页服务。
+
 如果双击没有反应，可以在项目目录打开命令行，运行：
 
 python 实训报告生成器网页.py
@@ -209,6 +211,14 @@ python 实训报告生成器网页.py
 在项目文件夹运行：
 
 pip install -r requirements.txt
+
+
+问题 3-1：提示 No module named 'cgi' 怎么办？
+
+答：
+这是旧版本脚本在 Python 3.13 上可能出现的问题，因为 Python 3.13 删除了 cgi 模块。
+请重新从 GitHub 下载最新版本，或者执行 git pull 更新项目。
+最新版已经不依赖 cgi，不需要安装 legacy-cgi。
 
 
 问题 4：生成失败，提示找不到模板怎么办？
