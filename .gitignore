@@ -1,0 +1,17 @@
+.idea/
+.venv/
+__pycache__/
+.report_web_cache/
+.agents/
+.codex/
+
+*.pyc
+*.pyo
+*.log
+
+~$*.docx
+测试生成_*.docx
+grouping_test*.docx
+ai_*_smoke.docx
+web_*.docx
+
