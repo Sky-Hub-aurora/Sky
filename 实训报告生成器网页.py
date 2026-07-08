@@ -131,7 +131,10 @@ class ReportWebHandler(BaseHTTPRequestHandler):
             uploaded_paths = save_uploaded_txt_files(form)
             output_name = build_output_name(form)
             output_path = unique_path(OUTPUT_DIR / output_name)
-            day_count = generate_report(form, uploaded_paths, output_path)
+            day_count, warnings = generate_report(form, uploaded_paths, output_path)
+            message = f"已根据 {len(uploaded_paths)} 个 TXT 整合为 {day_count} 天并生成报告。"
+            if warnings:
+                message += " AI 增强未成功，已自动改用本地规则生成。"
 
             job_id = uuid.uuid4().hex
             JOBS[job_id] = (output_path, output_path.name)
@@ -140,7 +143,8 @@ class ReportWebHandler(BaseHTTPRequestHandler):
                     "ok": True,
                     "filename": output_path.name,
                     "downloadUrl": f"/download?id={job_id}",
-                    "message": f"已根据 {len(uploaded_paths)} 个 TXT 整合为 {day_count} 天并生成报告。",
+                    "message": message,
+                    "warnings": warnings,
                 }
             )
         except Exception as exc:  # noqa: BLE001 - 本地网页需要把错误反馈给前端
@@ -222,8 +226,9 @@ def save_uploaded_txt_files(form: cgi.FieldStorage) -> list[Path]:
     return saved
 
 
-def generate_report(form: cgi.FieldStorage, sources: list[Path], output_path: Path) -> int:
+def generate_report(form: cgi.FieldStorage, sources: list[Path], output_path: Path) -> tuple[int, list[str]]:
     core = load_core()
+    core.clear_generation_warnings()
     template_path = core.resolve_template(get_form_value(form, "templatePath") or None)
     doc = core.Document(str(template_path))
 
@@ -251,6 +256,7 @@ def generate_report(form: cgi.FieldStorage, sources: list[Path], output_path: Pa
         temperature=float(get_form_value(form, "aiTemperature") or "0.2"),
     )
     source_groups = core.group_sources_by_day(sources)
+    variation_seed = f"{output_path.name}-{uuid.uuid4().hex}"
     for index, group in enumerate(source_groups, start=1):
         raw_text = core.read_source_group_text(group)
         report = core.build_day_report(
@@ -260,13 +266,14 @@ def generate_report(form: cgi.FieldStorage, sources: list[Path], output_path: Pa
             title_override=None,
             max_tasks=max_tasks,
             ai_config=ai_config,
+            variation_seed=f"{variation_seed}-{group.label}-{index}",
         )
         if index > 1 and get_bool(form, "dayPageBreak"):
             doc.add_page_break()
-        core.append_day_report(doc, report, screenshots_dir=None)
+        core.append_day_report(doc, report, screenshots_dir=None, auto_result_images=True)
 
     doc.save(str(output_path))
-    return len(source_groups)
+    return len(source_groups), core.get_generation_warnings()
 
 
 def build_output_name(form: cgi.FieldStorage) -> str:

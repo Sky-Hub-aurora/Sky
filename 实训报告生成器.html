@@ -751,8 +751,8 @@
 
       generateBtn.disabled = true;
       downloadBox.classList.remove("show");
-      setStatus("warn", "正在生成 Word", "本地脚本正在整理课程目标、内容详情、代码和图题。");
-      log(`开始生成，TXT 数量：${selectedFiles.length}；同月同日文件将合并为一天。`);
+      setStatus("warn", "正在生成 Word", "本地脚本正在整理课程目标、内容详情、代码和运行结果图。");
+      log(`开始生成，TXT 数量：${selectedFiles.length}；同月同日文件将合并为一天，并自动生成代码运行结果图。`);
 
       const data = new FormData();
       selectedFiles.forEach(file => data.append("notes", file, file.name));
@@ -785,6 +785,9 @@
         downloadBox.classList.add("show");
         setStatus("ok", "Word 已生成", result.message || "可以下载生成的实训报告。");
         log(`生成成功：${result.filename}`);
+        if (Array.isArray(result.warnings) && result.warnings.length) {
+          result.warnings.forEach(item => log(`提示：${item}`));
+        }
       } catch (error) {
         setStatus("error", "生成失败", error.message);
         log(`生成失败：${error.message}`);

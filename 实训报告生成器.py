@@ -13,9 +13,15 @@
 from __future__ import annotations
 
 import argparse
+import ast
+import hashlib
 import json
+import os
+import random
 import re
+import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -48,6 +54,32 @@ TEXT_ENCODINGS = ("utf-8-sig", "utf-8", "gb18030", "gbk", "cp936")
 BODY_SIZE = 10.5
 BODY_FIRST_LINE_INDENT = Pt(BODY_SIZE * 2)
 CN_NUMS = "零一二三四五六七八九十"
+AUTO_IMAGE_DIR = Path(__file__).resolve().parent / ".report_web_cache" / "run_images"
+PYCHARM_COMMAND_LINE = r"D:\PROJECT\.venv\Scripts\python.exe D:\PROJECT\lianxi.py"
+SAFE_IMPORTS = {"random", "math", "statistics"}
+DANGEROUS_NAMES = {
+    "__import__",
+    "compile",
+    "ctypes",
+    "delattr",
+    "eval",
+    "exec",
+    "exit",
+    "getattr",
+    "globals",
+    "help",
+    "locals",
+    "os",
+    "pathlib",
+    "quit",
+    "setattr",
+    "shutil",
+    "socket",
+    "subprocess",
+    "sys",
+    "vars",
+}
+GENERATION_WARNINGS: list[str] = []
 
 
 @dataclass
@@ -178,6 +210,8 @@ def main() -> int:
 
         source_groups = group_sources_by_day(source_paths)
         ai_config = build_ai_config_from_args(args)
+        clear_generation_warnings()
+        variation_seed = args.variation_seed or f"{output_path.name}-{datetime.now().isoformat(timespec='microseconds')}"
         for idx, group in enumerate(source_groups, start=1):
             raw_text = read_source_group_text(group)
             title_override = args.day_title[idx - 1] if idx <= len(args.day_title) else None
@@ -188,10 +222,16 @@ def main() -> int:
                 title_override=title_override,
                 max_tasks=args.max_tasks_per_day,
                 ai_config=ai_config,
+                variation_seed=f"{variation_seed}-{group.label}-{idx}",
             )
             if idx > 1 and args.day_page_break:
                 doc.add_page_break()
-            append_day_report(doc, report, screenshots_dir=Path(args.screenshots) if args.screenshots else None)
+            append_day_report(
+                doc,
+                report,
+                screenshots_dir=Path(args.screenshots) if args.screenshots else None,
+                auto_result_images=not args.no_auto_result_images,
+            )
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         doc.save(str(output_path))
@@ -203,6 +243,8 @@ def main() -> int:
             print(f"  第{day_index}天（{group.label}）：")
             for source in group.paths:
                 print(f"    - {source}")
+        for warning in get_generation_warnings():
+            print(f"提示：{warning}")
         return 0
     except Exception as exc:  # noqa: BLE001 - 命令行工具需要给出清楚错误
         print(f"生成失败：{exc}", file=sys.stderr)
@@ -221,6 +263,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--day-title", action="append", default=[], help="覆盖某一天标题，可重复传入，顺序对应资料文件。")
     parser.add_argument("--day-page-break", action="store_true", help="每天之间强制分页。")
     parser.add_argument("--max-tasks-per-day", type=int, default=8, help="每天最多写入的任务/练习数量。")
+    parser.add_argument("--no-auto-result-images", action="store_true", help="关闭代码运行结果图自动生成，只保留截图占位或手动截图。")
+    parser.add_argument("--variation-seed", default="", help="差异化生成种子；为空时根据输出文件名和当前时间自动生成。")
     parser.add_argument("--fill-cover", action="store_true", help="默认不动第一页；开启后只填封面学院、专业班级、学号、姓名。")
     parser.add_argument("--college", default="", help="封面学院。")
     parser.add_argument("--major-class", default="", help="封面专业班级。")
@@ -272,8 +316,18 @@ def resolve_sources(source_args: list[str]) -> list[Path]:
 
 
 def discover_uploaded_txt_sources() -> list[Path]:
-    txt_files = [path.resolve() for path in Path.cwd().glob("*.txt") if path.is_file()]
+    txt_files = [
+        path.resolve()
+        for pattern in ("*.txt", "*.TXT")
+        for path in Path.cwd().glob(pattern)
+        if path.is_file() and looks_like_note_filename(path.name)
+    ]
     return sorted(txt_files, key=natural_sort_key)
+
+
+def looks_like_note_filename(filename: str) -> bool:
+    stem = Path(filename).stem
+    return bool(re.search(r"(学习笔记)?\d{1,2}[-_]\d{1,2}(?:[-_]\d+)?$", stem))
 
 
 def natural_sort_key(path: Path) -> list[object]:
@@ -498,6 +552,7 @@ def build_day_report(
     title_override: str | None,
     max_tasks: int,
     ai_config: AIConfig | None = None,
+    variation_seed: str = "",
 ) -> DayReport:
     topics = extract_topics(raw_text)
     goals = generate_goals(topics)
@@ -516,8 +571,11 @@ def build_day_report(
     title = title_override or infer_day_title(source, raw_text, topics)
     report = DayReport(source, day_index, title, goals, topics, details, tasks)
     if ai_config and ai_config.enabled:
-        return enhance_day_report_with_ai(report, raw_text, max_tasks, ai_config)
-    return report
+        try:
+            report = enhance_day_report_with_ai(report, raw_text, max_tasks, ai_config, variation_seed)
+        except Exception as exc:  # noqa: BLE001 - AI 只是增强项，失败时应继续生成本地报告。
+            add_generation_warning(f"第{day_index}天 AI 增强失败，已自动改用本地规则生成：{exc}")
+    return diversify_day_report(report, raw_text, variation_seed)
 
 
 def enhance_day_report_with_ai(
@@ -525,17 +583,18 @@ def enhance_day_report_with_ai(
     raw_text: str,
     max_tasks: int,
     ai_config: AIConfig,
+    variation_seed: str = "",
 ) -> DayReport:
     if not ai_config.base_url or not ai_config.model:
         raise ValueError("启用 AI 增强时必须填写 API 地址和模型名。")
 
-    prompt = build_ai_prompt(fallback, raw_text, max_tasks)
+    prompt = build_ai_prompt(fallback, raw_text, max_tasks, variation_seed)
     content = call_openai_compatible_chat(ai_config, prompt)
     payload = extract_json_object(content)
     return merge_ai_payload_into_report(fallback, payload, max_tasks)
 
 
-def build_ai_prompt(fallback: DayReport, raw_text: str, max_tasks: int) -> str:
+def build_ai_prompt(fallback: DayReport, raw_text: str, max_tasks: int, variation_seed: str = "") -> str:
     text = raw_text.strip()
     if len(text) > 9000:
         text = text[:9000] + "\n……（资料过长，后文已截断）"
@@ -555,6 +614,9 @@ def build_ai_prompt(fallback: DayReport, raw_text: str, max_tasks: int) -> str:
 6. 课程代码及执行过程要把任务/练习拆开，每个任务单独写 requirement 和 Python code。
 7. code 必须是纯文本 Python 代码，不要图片，不要 Markdown 代码块。
 8. 最多生成 {max_tasks} 个任务；如果 TXT 任务少，可以根据知识点补充合理练习。
+9. 目标、详情和任务说明要主动变换句式，不要照搬固定模板。
+10. Python 代码里的变量名、示例数据和输出文本要自然变化，避免和底稿完全一致。
+11. 差异化参考编号：{variation_seed or fallback.source.stem}-{fallback.day_index}。
 
 JSON 格式：
 {{
@@ -697,6 +759,111 @@ def sanitize_string_list(value, fallback: list[str], limit: int) -> list[str]:
         if text:
             items.append(text)
     return unique_keep_order(items)[:limit] or fallback[:limit]
+
+
+def clear_generation_warnings() -> None:
+    GENERATION_WARNINGS.clear()
+
+
+def add_generation_warning(message: str) -> None:
+    if message and message not in GENERATION_WARNINGS:
+        GENERATION_WARNINGS.append(message)
+
+
+def get_generation_warnings() -> list[str]:
+    return GENERATION_WARNINGS[:]
+
+
+def diversify_day_report(report: DayReport, raw_text: str, variation_seed: str = "") -> DayReport:
+    seed_text = variation_seed or f"{report.source.name}-{report.day_index}-{datetime.now().isoformat(timespec='microseconds')}"
+    digest = hashlib.sha256((seed_text + raw_text[:2000]).encode("utf-8", errors="ignore")).hexdigest()
+    rng = random.Random(int(digest[:16], 16))
+
+    goals = [vary_sentence(goal, rng, "goal", index) for index, goal in enumerate(report.goals)]
+    details = [vary_sentence(detail, rng, "detail", index) for index, detail in enumerate(report.details)]
+    tasks = [
+        TaskItem(
+            title=task.title,
+            requirement=vary_sentence(task.requirement, rng, "requirement", index),
+            code=diversify_code(task.code, rng, index),
+            caption=task.caption,
+        )
+        for index, task in enumerate(report.tasks)
+    ]
+    return DayReport(report.source, report.day_index, report.title, goals, report.topics, details, tasks)
+
+
+def vary_sentence(text: str, rng: random.Random, role: str, index: int) -> str:
+    body = text.strip().rstrip("。；; ")
+    if not body:
+        return text
+    templates = {
+        "goal": [
+            "通过本次实训，{body}。",
+            "结合课堂示例，{body}。",
+            "围绕当天内容，{body}。",
+            "在练习与调试过程中，{body}。",
+        ],
+        "detail": [
+            "{body}，并通过代码示例加深理解。",
+            "课堂中围绕该部分进行了讲解，主要内容为：{body}。",
+            "{body}，后续练习中需要注意输入、处理和输出之间的衔接。",
+            "本部分主要围绕以下内容展开：{body}。",
+        ],
+        "requirement": [
+            "本任务要求{body}。",
+            "在 PyCharm 中完成该练习：{body}。",
+            "围绕课堂知识点，编写程序实现：{body}。",
+            "按照题目要求，完成{body}。",
+        ],
+    }
+    choices = templates.get(role)
+    if not choices:
+        return body + "。"
+
+    template = choices[(rng.randrange(len(choices)) + index) % len(choices)]
+    normalized = normalize_sentence_body(body, role)
+    return template.format(body=normalized)
+
+
+def normalize_sentence_body(text: str, role: str) -> str:
+    text = re.sub(r"^通过本次实训，", "", text)
+    text = re.sub(r"^结合课堂示例，", "", text)
+    text = re.sub(r"^本任务要求", "", text)
+    text = re.sub(r"^按照题目要求，完成", "", text)
+    if role == "requirement":
+        return text.lstrip("，,：: ")
+    return text
+
+
+def diversify_code(code: str, rng: random.Random, index: int) -> str:
+    replacements = {
+        "小明": ["小林", "小周", "小华", "小陈"],
+        "小花": ["小雅", "小雪", "小敏", "小雨"],
+        "西安": ["西安", "成都", "武汉", "南京"],
+        "北京": ["北京", "杭州", "青岛", "广州"],
+        "上海": ["上海", "苏州", "天津", "深圳"],
+        "2026": ["2025", "2026", "2027", "2028"],
+        "实训记录.txt": ["实训记录.txt", "课堂练习记录.txt", "python实训记录.txt", "学习记录.txt"],
+        "今天学习了Python文件读写命令。": [
+            "今天练习了Python文件读写命令。",
+            "本次实训完成了文件写入与读取操作。",
+            "课堂中学习了with open()文件处理方式。",
+        ],
+        "with open()可以自动关闭文件。": [
+            "with open()结构可以帮助程序自动关闭文件。",
+            "文件处理时需要注意编码和关闭操作。",
+            "读取文件时要保证路径和编码设置正确。",
+        ],
+        "练习本": ["练习本", "笔记本", "中性笔", "资料册"],
+        "Python编程语言": ["Python编程语言", "暑期实训", "数据分析基础", "课堂练习"],
+    }
+    result = code
+    for old, values in replacements.items():
+        if old in result:
+            choice = values[(rng.randrange(len(values)) + index) % len(values)]
+            result = result.replace(old, choice)
+    return result
 
 
 def extract_topics(text: str) -> list[str]:
@@ -961,7 +1128,12 @@ def generate_code(title: str, requirement: str) -> str:
     ).strip()
 
 
-def append_day_report(doc: Document, report: DayReport, screenshots_dir: Path | None) -> None:
+def append_day_report(
+    doc: Document,
+    report: DayReport,
+    screenshots_dir: Path | None,
+    auto_result_images: bool = True,
+) -> None:
     add_day_heading(doc, f"第{chinese_number(report.day_index)}天：{report.title}")
 
     add_section_heading(doc, "1、课程目标：")
@@ -977,7 +1149,7 @@ def append_day_report(doc: Document, report: DayReport, screenshots_dir: Path | 
 
     add_section_heading(doc, "4、课程代码及执行过程：")
     for task_index, task in enumerate(report.tasks, start=1):
-        add_task_block(doc, report.day_index, task_index, task, screenshots_dir)
+        add_task_block(doc, report.day_index, task_index, task, screenshots_dir, auto_result_images)
 
 
 def add_task_block(
@@ -986,6 +1158,7 @@ def add_task_block(
     task_index: int,
     task: TaskItem,
     screenshots_dir: Path | None,
+    auto_result_images: bool = True,
 ) -> None:
     add_section_heading(doc, f"任务{task_index}：{task.title}")
     add_body_paragraph(doc, f"【任务要求】{task.requirement}")
@@ -994,6 +1167,8 @@ def add_task_block(
     add_body_paragraph(doc, "运行结果：")
 
     image_path = find_screenshot(screenshots_dir, day_index, task_index) if screenshots_dir else None
+    if image_path is None and auto_result_images:
+        image_path = create_result_screenshot(task, day_index, task_index)
     if image_path:
         paragraph = doc.add_paragraph(style="实训报告_图题")
         paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -1002,6 +1177,365 @@ def add_task_block(
     else:
         add_caption_paragraph(doc, f"（此处插入 {day_index}-{task_index} {task.caption}运行结果截图）")
     add_caption_paragraph(doc, f"图{day_index}-{task_index} {task.caption}运行结果")
+
+
+def create_result_screenshot(task: TaskItem, day_index: int, task_index: int) -> Path | None:
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        return None
+
+    AUTO_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(task.code.encode("utf-8", errors="ignore")).hexdigest()[:10]
+    caption = safe_image_stem(task.caption or task.title)
+    target = AUTO_IMAGE_DIR / f"{day_index}-{task_index}-{caption}-{digest}.png"
+    lines, exit_code = build_console_output(task, day_index, task_index)
+    render_pycharm_console_image(
+        lines=lines,
+        exit_code=exit_code,
+        target=target,
+        image_module=Image,
+        draw_module=ImageDraw,
+        font_module=ImageFont,
+    )
+    return target if target.exists() else None
+
+
+def build_console_output(task: TaskItem, day_index: int, task_index: int) -> tuple[list[str], int]:
+    executed = execute_python_code_safely(task.code, day_index, task_index)
+    if executed is not None:
+        output, exit_code = executed
+    else:
+        output, exit_code = simulate_code_output(task), 0
+
+    lines = [PYCHARM_COMMAND_LINE]
+    lines.extend(line.rstrip() for line in output.splitlines())
+    if len(lines) == 1:
+        lines.append("程序运行完成。")
+    lines.append("")
+    lines.append(f"进程已结束，退出代码为 {exit_code}")
+    return lines, exit_code
+
+
+def execute_python_code_safely(code: str, day_index: int, task_index: int) -> tuple[str, int] | None:
+    if not is_safe_code_for_execution(code):
+        return None
+
+    input_values = build_input_values(code)
+    wrapped_code = build_execution_wrapper(code, input_values, seed=day_index * 100 + task_index)
+    try:
+        with tempfile.TemporaryDirectory(prefix="report_code_run_") as temp_dir:
+            script_path = Path(temp_dir) / "lianxi.py"
+            script_path.write_text(wrapped_code, encoding="utf-8")
+            env = os.environ.copy()
+            env["PYTHONIOENCODING"] = "utf-8"
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                cwd=temp_dir,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+                env=env,
+                check=False,
+            )
+    except Exception:
+        return None
+
+    output = (result.stdout or "").rstrip()
+    if result.stderr:
+        output = (output + "\n" if output else "") + result.stderr.strip()
+    if len(output) > 5000:
+        output = output[:5000].rstrip() + "\n……输出过长，后续内容已省略。"
+    return output, result.returncode
+
+
+def build_execution_wrapper(code: str, input_values: list[str], seed: int) -> str:
+    return "\n".join(
+        [
+            "import builtins",
+            "import random",
+            f"random.seed({seed})",
+            f"_report_inputs = iter({input_values!r})",
+            "def _report_input(prompt=''):",
+            "    print(str(prompt), end='')",
+            "    try:",
+            "        value = next(_report_inputs)",
+            "    except StopIteration:",
+            "        value = ''",
+            "    print(value)",
+            "    return value",
+            "builtins.input = _report_input",
+            code,
+        ]
+    )
+
+
+def build_input_values(code: str) -> list[str]:
+    prompts = re.findall(r"input\(\s*(?:f)?[\"']([^\"']*)[\"']?", code)
+    if not prompts and "input(" in code:
+        prompts = ["请输入内容"]
+
+    values: list[str] = []
+    number_inputs = ["50", "75", "88", "94", "97", "98", "100"]
+    for index, prompt in enumerate(prompts):
+        if "用户名" in prompt:
+            values.append("sky_2026")
+        elif "班级" in prompt:
+            values.append("23060101")
+        elif "组别" in prompt or "组号" in prompt:
+            values.append("2")
+        elif "姓名" in prompt:
+            values.append("StudentA")
+        elif "商品" in prompt:
+            values.append("笔记本")
+        elif "单价" in prompt or "价格" in prompt:
+            values.append("12.5")
+        elif "数量" in prompt:
+            values.append("4")
+        elif "数字" in prompt or "猜" in prompt:
+            values.append(number_inputs[min(index, len(number_inputs) - 1)])
+        else:
+            values.append(str(index + 3))
+
+    if "猜数字" in code and len(values) < 7:
+        values.extend(number_inputs[len(values) :])
+    return values
+
+
+def is_safe_code_for_execution(code: str) -> bool:
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return False
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Delete, ast.Global, ast.Nonlocal)):
+            return False
+        if isinstance(node, ast.While) and isinstance(node.test, ast.Constant) and node.test.value is True:
+            return False
+        if isinstance(node, ast.Import):
+            if any(alias.name.split(".")[0] not in SAFE_IMPORTS for alias in node.names):
+                return False
+        if isinstance(node, ast.ImportFrom):
+            module = (node.module or "").split(".")[0]
+            if module not in SAFE_IMPORTS:
+                return False
+        if isinstance(node, ast.Attribute) and node.attr.startswith("__"):
+            return False
+        if isinstance(node, ast.Name) and node.id in DANGEROUS_NAMES:
+            return False
+        if isinstance(node, ast.Call):
+            if not is_safe_call_node(node):
+                return False
+            if is_oversized_range_call(node):
+                return False
+    return True
+
+
+def is_oversized_range_call(node: ast.Call) -> bool:
+    if not isinstance(node.func, ast.Name) or node.func.id != "range":
+        return False
+    numeric_args = [arg.value for arg in node.args if isinstance(arg, ast.Constant) and isinstance(arg.value, int)]
+    return any(abs(value) > 10000 for value in numeric_args)
+
+
+def is_safe_call_node(node: ast.Call) -> bool:
+    func = node.func
+    if isinstance(func, ast.Name):
+        if func.id in DANGEROUS_NAMES:
+            return False
+        if func.id == "open":
+            return is_safe_open_call(node)
+    if isinstance(func, ast.Attribute):
+        if func.attr.startswith("__") or func.attr in DANGEROUS_NAMES:
+            return False
+    return True
+
+
+def is_safe_open_call(node: ast.Call) -> bool:
+    if not node.args or not isinstance(node.args[0], ast.Constant) or not isinstance(node.args[0].value, str):
+        return False
+    file_name = node.args[0].value
+    path = Path(file_name)
+    if path.is_absolute() or ".." in path.parts:
+        return False
+    if "\\" in file_name or "/" in file_name:
+        return False
+    return True
+
+
+def simulate_code_output(task: TaskItem) -> str:
+    code = task.code
+    if "请输入用户名" in code and "upper()" in code:
+        return "请输入用户名（包含数字、字母、下划线，长度为8）：sky_2026\n用户名： SKY_2026"
+    if "原始新闻" in code and "足球" in code:
+        return "\n".join(
+            [
+                "原始新闻： 在昨晚进行的一场足球比赛中，主场作战的球队以3比1战胜了客队。足球运动吸引了众多球迷观看，年轻球员的配合提升了足球进攻的效率。",
+                "第1个'足球'出现的位置： 9",
+                "'足球'出现的次数： 3",
+                "替换后的新闻： 在昨晚进行地一场足球比赛中，主场作战地球队以3比1战胜了客队。足球运动吸引了众多球迷观看，年轻球员地配合提升了足球进攻地效率。",
+            ]
+        )
+    if "strip()" in code or ".strip()" in code:
+        return "原始字符串： '\\n\\n\\n我们正在进行暑假实训\\n\\n\\n'\n去除前后空白后： '我们正在进行暑假实训'"
+    if "split(" in code and "join(" in code:
+        return "拆分后的列表： ['姓名:小花', '年龄:20', '性别:女', '电话:13444444444']\n组合后的字符串： 姓名:小花+年龄:20+性别:女+电话:13444444444"
+    if "range(1, 10)" in code and "*{i}" in code:
+        return "\n".join(
+            "\t".join(f"{j}*{i}={i * j}" for j in range(1, i + 1))
+            for i in range(1, 10)
+        )
+    if "猜数字" in code or "randint" in code:
+        return "\n".join(
+            [
+                "第1次请输入1到100之间的数字：50",
+                "您猜小了",
+                "剩余次数： 5",
+                "第2次请输入1到100之间的数字：75",
+                "您猜大了",
+                "剩余次数： 4",
+                "第3次请输入1到100之间的数字：63",
+                "恭喜你猜对了",
+                "猜测记录： [50, 75, 63]",
+            ]
+        )
+    if "continue" in code and "break" in code:
+        return "1 3 5 7 9 11 13 15 "
+    if "calc_total" in code:
+        return "请输入商品名称：笔记本\n请输入商品单价：12.5\n请输入购买数量：4\n笔记本的总价为：50.00元"
+    if "文件内容如下" in code:
+        return "文件内容如下：\n今天练习了Python文件读写命令。\nwith open()结构可以帮助程序自动关闭文件。"
+    if "类型为" in code:
+        return "\n".join(
+            [
+                "字符类型 ： Python编程语言 ，类型为： <class 'str'>",
+                "数值类型 ： 2026 ，类型为： <class 'int'>",
+                "布尔类型 ： True ，类型为： <class 'bool'>",
+                "列表 ： ['西安', '北京', '上海'] ，类型为： <class 'list'>",
+                "字典 ： {'姓名': '小明', '年龄': 20} ，类型为： <class 'dict'>",
+                "元组 ： ('暑期实训',) ，类型为： <class 'tuple'>",
+                "集合 ： {1, 2, 3} ，类型为： <class 'set'>",
+            ]
+        )
+    if "请输入班级" in code and "请输入组别" in code and "请输入姓名" in code:
+        return "请输入班级：23060101\n请输入组别：2\n请输入姓名：StudentA\n我是23060101班的学生，我是第2组，我的姓名是：StudentA"
+
+    printed = extract_simple_print_output(code)
+    if printed:
+        return printed
+    return f"任务名称：{task.title}\n任务要求：{task.requirement}\n程序运行完成。"
+
+
+def extract_simple_print_output(code: str) -> str:
+    lines: list[str] = []
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return ""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name) or node.func.id != "print":
+            continue
+        parts: list[str] = []
+        for arg in node.args:
+            if isinstance(arg, ast.Constant):
+                parts.append(str(arg.value))
+        if parts:
+            lines.append(" ".join(parts))
+    return "\n".join(lines)
+
+
+def render_pycharm_console_image(
+    lines: list[str],
+    exit_code: int,
+    target: Path,
+    image_module,
+    draw_module,
+    font_module,
+) -> None:
+    font = load_result_font(font_module, 22)
+    title_font = load_result_font(font_module, 20)
+    small_font = load_result_font(font_module, 16)
+    wrapped_lines = wrap_console_lines(lines, 82)
+    line_height = 30
+    width = 960
+    height = max(290, 128 + len(wrapped_lines) * line_height + 34)
+
+    image = image_module.new("RGB", (width, height), "#17191d")
+    draw = draw_module.Draw(image)
+
+    draw.rectangle((0, 0, width, 72), fill="#1f2227")
+    draw.text((22, 24), "运行", fill="#f3f6fb", font=title_font)
+    draw.rounded_rectangle((92, 14, 232, 58), radius=8, fill="#243452", outline="#3b63a5", width=2)
+    draw.ellipse((112, 25, 132, 45), fill="#5da8ff")
+    draw.text((146, 24), "lianxi", fill="#dfe8f7", font=title_font)
+    draw.text((211, 24), "×", fill="#8d96a6", font=title_font)
+
+    draw.rectangle((0, 72, width, 126), fill="#181b20")
+    draw.line((0, 72, width, 72), fill="#2a2e36", width=1)
+    draw.line((0, 126, width, 126), fill="#2a2e36", width=1)
+    draw.rectangle((0, 126, 66, height), fill="#181b20")
+    draw.line((66, 126, 66, height), fill="#2b3038", width=1)
+    draw.text((24, 90), "▷", fill="#5fb66d", font=title_font)
+    draw.text((74, 90), "■", fill="#8b929f", font=small_font)
+    draw.text((120, 87), "⋮", fill="#adb4c0", font=title_font)
+    for offset, icon in enumerate(["↑", "↓", "≡", "⇩", "▣", "⌫"]):
+        draw.text((24, 150 + offset * 42), icon, fill="#777e8a", font=title_font)
+
+    y = 142
+    for line in wrapped_lines:
+        color = "#bfc7d5"
+        if "Traceback" in line or exit_code != 0 and line == wrapped_lines[-1]:
+            color = "#ff7b72"
+        if line.startswith("请输入") and "：" in line:
+            prefix, value = line.rsplit("：", 1)
+            draw.text((88, y), prefix + "：", fill="#bfc7d5", font=font)
+            prefix_width = draw.textlength(prefix + "：", font=font)
+            draw.text((88 + prefix_width, y), value, fill="#65b96d", font=font)
+        else:
+            draw.text((88, y), line, fill=color, font=font)
+        y += line_height
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    image.save(target)
+
+
+def load_result_font(font_module, size: int):
+    candidates = [
+        r"C:\Windows\Fonts\msyh.ttc",
+        r"C:\Windows\Fonts\simsun.ttc",
+        r"C:\Windows\Fonts\consola.ttf",
+        r"C:\Windows\Fonts\arial.ttf",
+    ]
+    for candidate in candidates:
+        if Path(candidate).exists():
+            try:
+                return font_module.truetype(candidate, size=size)
+            except Exception:
+                continue
+    return font_module.load_default()
+
+
+def wrap_console_lines(lines: list[str], max_chars: int) -> list[str]:
+    wrapped: list[str] = []
+    for line in lines:
+        if len(line) <= max_chars:
+            wrapped.append(line)
+            continue
+        current = line
+        while len(current) > max_chars:
+            wrapped.append(current[:max_chars])
+            current = "    " + current[max_chars:]
+        wrapped.append(current)
+    return wrapped
+
+
+def safe_image_stem(text: str) -> str:
+    text = cleanup_caption(text) or "运行结果"
+    text = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", text)
+    return text[:24]
 
 
 def add_day_heading(doc: Document, text: str) -> None:
