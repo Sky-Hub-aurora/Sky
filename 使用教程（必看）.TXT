@@ -237,6 +237,7 @@ pip install -r requirements.txt
 4. 模型名是否为：deepseek-v4-flash
 5. API Key 是否正确。
 6. DeepSeek 账户是否还有额度。
+7. 如果出现 WinError 10013，通常是 Windows 防火墙、杀毒软件、代理/VPN 或当前运行环境禁止 Python 访问外网。请关闭当前服务窗口后，双击“启动实训报告网页.bat”重新启动；如果仍失败，请在防火墙中允许 python.exe 联网，并检查代理/VPN 设置。
 
 如果仍然不能用，可以先关闭 AI 增强，用本地规则生成。
 
@@ -272,4 +273,3 @@ README.md
 6. 拖入 TXT。
 7. 点击生成 Word。
 8. 下载生成的实训报告。
-

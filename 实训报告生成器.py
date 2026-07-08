@@ -614,7 +614,7 @@ def call_openai_compatible_chat(ai_config: AIConfig, prompt: str) -> str:
         detail = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"AI 接口请求失败：HTTP {exc.code}，{detail[:300]}") from exc
     except url_error.URLError as exc:
-        raise RuntimeError(f"AI 接口连接失败：{exc.reason}") from exc
+        raise RuntimeError(f"AI 接口连接失败：{format_ai_connection_error(exc.reason)}") from exc
 
     payload = json.loads(response_text)
     choices = payload.get("choices") or []
@@ -634,6 +634,21 @@ def normalize_chat_endpoint(base_url: str) -> str:
     if base_url.endswith("/chat/completions"):
         return base_url
     return f"{base_url}/chat/completions"
+
+
+def format_ai_connection_error(reason) -> str:
+    reason_text = str(reason)
+    if "10013" in reason_text:
+        return (
+            f"{reason_text}。这是 Windows 拒绝外网 socket 连接的错误，通常不是 API Key 写错。"
+            "请优先关闭当前网页服务窗口后，双击“启动实训报告网页.bat”重新启动；"
+            "如果仍失败，请在 Windows 防火墙/杀毒软件里允许 python.exe 访问网络，并检查 VPN/代理是否拦截了 https://api.deepseek.com。"
+        )
+    if "getaddrinfo failed" in reason_text or "Name or service not known" in reason_text:
+        return f"{reason_text}。请检查 AI API 地址是否填写正确，以及网络/DNS 是否可用。"
+    if "timed out" in reason_text or "timeout" in reason_text.lower():
+        return f"{reason_text}。连接超时，请检查网络、代理/VPN 或 DeepSeek 服务状态。"
+    return reason_text
 
 
 def extract_json_object(content: str) -> dict:
