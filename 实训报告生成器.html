@@ -593,14 +593,17 @@
             </div>
 
             <div class="ai-box" id="aiBox">
+              <div class="option-row">
+                <button class="secondary" id="deepseekPresetBtn" type="button">填入 DeepSeek 预设</button>
+              </div>
               <div class="field-grid">
                 <div class="field full">
                   <label for="aiBaseUrl">AI API 地址</label>
-                  <input id="aiBaseUrl" type="text" placeholder="OpenAI兼容地址，例如：https://接口域名/v1">
+                  <input id="aiBaseUrl" type="text" placeholder="DeepSeek：https://api.deepseek.com">
                 </div>
                 <div class="field">
                   <label for="aiModel">模型名</label>
-                  <input id="aiModel" type="text" placeholder="模型ID">
+                  <input id="aiModel" type="text" placeholder="例如：deepseek-v4-flash">
                 </div>
                 <div class="field">
                   <label for="aiTemperature">温度</label>
@@ -655,6 +658,7 @@
     const clearFilesBtn = document.getElementById("clearFiles");
     const sampleBtn = document.getElementById("sampleBtn");
     const clearLogBtn = document.getElementById("clearLog");
+    const deepseekPresetBtn = document.getElementById("deepseekPresetBtn");
     const logBox = document.getElementById("log");
     const statusSymbol = document.getElementById("statusSymbol");
     const statusTitle = document.getElementById("statusTitle");
@@ -852,6 +856,14 @@
 
     renderFiles();
     checkServer();
+    deepseekPresetBtn.addEventListener("click", () => {
+      document.getElementById("aiEnabled").checked = true;
+      document.getElementById("aiBox").classList.add("show");
+      document.getElementById("aiBaseUrl").value = "https://api.deepseek.com";
+      document.getElementById("aiModel").value = "deepseek-v4-flash";
+      document.getElementById("aiTemperature").value = "0.2";
+      log("已填入 DeepSeek 预设：API 地址 https://api.deepseek.com，模型 deepseek-v4-flash。");
+    });
     document.getElementById("aiEnabled").addEventListener("change", event => {
       document.getElementById("aiBox").classList.toggle("show", event.target.checked);
       log(event.target.checked ? "已开启 AI 增强配置。" : "已关闭 AI 增强。");

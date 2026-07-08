@@ -591,6 +591,9 @@ def call_openai_compatible_chat(ai_config: AIConfig, prompt: str) -> str:
     body = {
         "model": ai_config.model,
         "temperature": ai_config.temperature,
+        "stream": False,
+        "max_tokens": 6000,
+        "response_format": {"type": "json_object"},
         "messages": [
             {
                 "role": "system",

@@ -54,3 +54,11 @@ http://127.0.0.1:8765/
 
 AI 增强是可选功能。不填写 AI API 配置时，工具会完全使用本地规则生成报告。
 
+DeepSeek 推荐填写：
+
+```text
+AI API 地址：https://api.deepseek.com
+模型名：deepseek-v4-flash
+```
+
+API Key 使用 DeepSeek 控制台生成的 Key。网页中的 `填入 DeepSeek 预设` 按钮会自动填写 API 地址和模型名。
