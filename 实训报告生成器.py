@@ -19,9 +19,11 @@ import json
 import os
 import random
 import re
+import socket
 import subprocess
 import sys
 import tempfile
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -29,6 +31,8 @@ from textwrap import dedent
 from typing import Iterable
 from urllib import error as url_error
 from urllib import request as url_request
+from urllib.parse import urlparse
+from xml.sax.saxutils import escape as xml_escape
 
 from docx import Document
 from docx.enum.style import WD_STYLE_TYPE
@@ -56,7 +60,8 @@ BODY_FIRST_LINE_INDENT = Pt(BODY_SIZE * 2)
 CN_NUMS = "零一二三四五六七八九十"
 AUTO_IMAGE_DIR = Path(__file__).resolve().parent / ".report_web_cache" / "run_images"
 PYCHARM_COMMAND_LINE = r"D:\PROJECT\.venv\Scripts\python.exe D:\PROJECT\lianxi.py"
-SAFE_IMPORTS = {"random", "math", "statistics"}
+NO_TASK_MESSAGE = "这次没有任务和练习，可能老师上课布置的作业，回忆回忆，自己添加哦！"
+SAFE_IMPORTS = {"random", "math", "statistics", "re"}
 DANGEROUS_NAMES = {
     "__import__",
     "compile",
@@ -79,7 +84,19 @@ DANGEROUS_NAMES = {
     "sys",
     "vars",
 }
+SAMPLE_NAMES = ["LinQiao", "ChenYu", "ZhaoNing", "XuRan", "LuoMing", "HeYue", "TangXin", "QinMo", "SunYi", "YeFan"]
+SAMPLE_CHINESE_NAMES = ["林乔", "陈宇", "赵宁", "徐然", "罗明", "何月", "唐欣", "秦墨", "孙一", "叶凡"]
+SAMPLE_CLASSES = ["23060101", "23060102", "计科1", "软件2", "大数据1"]
+SAMPLE_GROUPS = ["1", "2", "3", "4", "A", "B"]
+SAMPLE_PRODUCTS = ["笔记本", "资料册", "中性笔", "文件夹", "U盘", "练习本"]
+SAMPLE_PROJECTS = ["Python课堂练习", "暑期实训", "数据处理基础", "程序设计练习", "课程记录"]
+SAMPLE_TEXT_LINES = [
+    "本次练习完成了输入、处理和输出的基本流程。",
+    "课堂中重点观察了代码运行结果和变量变化。",
+    "通过调试可以更清楚地理解程序执行顺序。",
+]
 GENERATION_WARNINGS: list[str] = []
+AI_USAGE_EVENTS: list[str] = []
 
 
 @dataclass
@@ -109,6 +126,13 @@ class SourceGroup:
 
 
 @dataclass
+class ComparisonRow:
+    project: str
+    original_text: str
+    generated_text: str
+
+
+@dataclass
 class AIConfig:
     enabled: bool = False
     base_url: str = ""
@@ -116,6 +140,11 @@ class AIConfig:
     model: str = ""
     temperature: float = 0.2
     timeout: int = 60
+    proxy_url: str = ""
+
+
+COMMON_LOCAL_PROXY_PORTS = (7890, 7897, 10809, 1080, 20171, 6152)
+COMMON_LOCAL_PROXY_HOSTS = ("127.0.0.1", "localhost")
 
 
 TOPIC_RULES = [
@@ -212,6 +241,7 @@ def main() -> int:
         ai_config = build_ai_config_from_args(args)
         clear_generation_warnings()
         variation_seed = args.variation_seed or f"{output_path.name}-{datetime.now().isoformat(timespec='microseconds')}"
+        comparison_rows: list[ComparisonRow] = []
         for idx, group in enumerate(source_groups, start=1):
             raw_text = read_source_group_text(group)
             title_override = args.day_title[idx - 1] if idx <= len(args.day_title) else None
@@ -224,6 +254,7 @@ def main() -> int:
                 ai_config=ai_config,
                 variation_seed=f"{variation_seed}-{group.label}-{idx}",
             )
+            comparison_rows.extend(build_comparison_rows(report, raw_text, group))
             if idx > 1 and args.day_page_break:
                 doc.add_page_break()
             append_day_report(
@@ -235,8 +266,11 @@ def main() -> int:
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         doc.save(str(output_path))
+        comparison_path = output_path.with_name("对照表.xlsx")
+        write_comparison_xlsx(comparison_path, comparison_rows)
 
         print(f"已生成实训报告：{output_path}")
+        print(f"已生成对照表：{comparison_path}")
         print(f"使用模板：{template_path}")
         print("按天使用的资料：")
         for day_index, group in enumerate(source_groups, start=1):
@@ -277,6 +311,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ai-api-key", default="", help="API Key；没有鉴权要求的本地/免费接口可以留空。")
     parser.add_argument("--ai-model", default="", help="模型名称。")
     parser.add_argument("--ai-temperature", type=float, default=0.2, help="AI 生成温度。")
+    parser.add_argument("--ai-proxy", default="", help="可选代理地址，例如：http://127.0.0.1:7890。")
     return parser.parse_args()
 
 
@@ -289,6 +324,7 @@ def build_ai_config_from_args(args: argparse.Namespace) -> AIConfig:
         api_key=args.ai_api_key.strip(),
         model=args.ai_model.strip(),
         temperature=args.ai_temperature,
+        proxy_url=args.ai_proxy.strip(),
     )
 
 
@@ -553,29 +589,25 @@ def build_day_report(
     max_tasks: int,
     ai_config: AIConfig | None = None,
     variation_seed: str = "",
+    personal_note: str = "",
 ) -> DayReport:
     topics = extract_topics(raw_text)
     goals = generate_goals(topics)
     details = generate_details(topics, raw_text)
     tasks = extract_tasks(raw_text)
-    tasks.extend(suggest_tasks_from_keywords(raw_text, tasks))
     tasks = merge_tasks(tasks)[:max_tasks]
-    if not tasks:
-        tasks = [
-            build_task(
-                title="课堂知识点综合练习",
-                requirement="根据当天课堂笔记，编写一个综合示例程序，对主要知识点进行练习。",
-            )
-        ]
 
     title = title_override or infer_day_title(source, raw_text, topics)
     report = DayReport(source, day_index, title, goals, topics, details, tasks)
+    ai_enhanced = False
     if ai_config and ai_config.enabled:
         try:
-            report = enhance_day_report_with_ai(report, raw_text, max_tasks, ai_config, variation_seed)
+            report = enhance_day_report_with_ai(report, raw_text, max_tasks, ai_config, variation_seed, personal_note)
+            ai_enhanced = True
+            add_ai_usage_event(f"第{day_index}天已真实调用 API 模型：{ai_config.model}")
         except Exception as exc:  # noqa: BLE001 - AI 只是增强项，失败时应继续生成本地报告。
-            add_generation_warning(f"第{day_index}天 AI 增强失败，已自动改用本地规则生成：{exc}")
-    return diversify_day_report(report, raw_text, variation_seed)
+            add_generation_warning(f"AI 增强失败，已自动改用本地规则生成：{exc}")
+    return diversify_day_report(report, raw_text, variation_seed, ai_enhanced=ai_enhanced, personal_note=personal_note)
 
 
 def enhance_day_report_with_ai(
@@ -584,17 +616,34 @@ def enhance_day_report_with_ai(
     max_tasks: int,
     ai_config: AIConfig,
     variation_seed: str = "",
+    personal_note: str = "",
 ) -> DayReport:
     if not ai_config.base_url or not ai_config.model:
         raise ValueError("启用 AI 增强时必须填写 API 地址和模型名。")
 
-    prompt = build_ai_prompt(fallback, raw_text, max_tasks, variation_seed)
+    prompt = build_ai_prompt(fallback, raw_text, max_tasks, variation_seed, personal_note)
     content = call_openai_compatible_chat(ai_config, prompt)
     payload = extract_json_object(content)
     return merge_ai_payload_into_report(fallback, payload, max_tasks)
 
 
-def build_ai_prompt(fallback: DayReport, raw_text: str, max_tasks: int, variation_seed: str = "") -> str:
+def test_ai_connection(ai_config: AIConfig) -> str:
+    if not ai_config.base_url or not ai_config.model:
+        raise ValueError("请先填写 AI API 地址和模型名。")
+    prompt = '请只输出 JSON：{"ok": true, "message": "连接成功"}'
+    content = call_openai_compatible_chat(ai_config, prompt)
+    payload = extract_json_object(content)
+    message = str(payload.get("message") or "连接成功")
+    return message
+
+
+def build_ai_prompt(
+    fallback: DayReport,
+    raw_text: str,
+    max_tasks: int,
+    variation_seed: str = "",
+    personal_note: str = "",
+) -> str:
     text = raw_text.strip()
     if len(text) > 9000:
         text = text[:9000] + "\n……（资料过长，后文已截断）"
@@ -611,12 +660,19 @@ def build_ai_prompt(fallback: DayReport, raw_text: str, max_tasks: int, variatio
 3. 课程目标反向概括当天学习目标。
 4. 课程内容只写知识点名称，用数组列出。
 5. 课程内容详情用数组列出，每条是完整句子。
-6. 课程代码及执行过程要把任务/练习拆开，每个任务单独写 requirement 和 Python code。
+6. 课程代码及执行过程只能根据 TXT 里明确出现的任务/练习生成，不允许自行补充任务。
 7. code 必须是纯文本 Python 代码，不要图片，不要 Markdown 代码块。
-8. 最多生成 {max_tasks} 个任务；如果 TXT 任务少，可以根据知识点补充合理练习。
+8. 最多生成 {max_tasks} 个任务；如果本地规则底稿里的 tasks 为空，返回的 tasks 必须为空数组。
 9. 目标、详情和任务说明要主动变换句式，不要照搬固定模板。
 10. Python 代码里的变量名、示例数据和输出文本要自然变化，避免和底稿完全一致。
 11. 差异化参考编号：{variation_seed or fallback.source.stem}-{fallback.day_index}。
+12. 重点：必须做“内容重构”，不能只改变知识点顺序。可以从学习目的、应用场景、操作流程、调试注意点、课堂理解角度重新组织表达。
+13. topics 仍然只能写知识点名称，但名称可以更具体，例如“输入输出命令”可重构为“交互式输入与格式化输出”；不要写成完整句子。
+14. details 要体现新的侧重点，不能逐句复述本地规则底稿；每条建议 30-80 字。
+15. 若有任务，code 要可运行，变量名、示例数据、输出文案要和底稿不同，但必须符合任务要求。
+16. 保持学生实训报告口吻，不要写成 AI 总结稿、宣传稿或论文。
+17. 必须根据“个性化要求”微调表达角度、示例侧重点和总结语气；如果个性化要求为空，也要从 TXT 原文中提炼差异化表达。
+18. 避免与本地规则底稿使用相同开头、相同结尾、相同段落顺序；如果某一条内容和底稿高度相似，请重写后再输出。
 
 JSON 格式：
 {{
@@ -645,48 +701,205 @@ JSON 格式：
 
 课堂 TXT 笔记：
 {text}
+
+个性化要求：
+{personal_note.strip() or "无。请根据 TXT 文件名、知识点、任务类型和课堂笔记细节自行调整表达角度。"}
 """.strip()
 
 
 def call_openai_compatible_chat(ai_config: AIConfig, prompt: str) -> str:
     endpoint = normalize_chat_endpoint(ai_config.base_url)
-    body = {
-        "model": ai_config.model,
-        "temperature": ai_config.temperature,
-        "stream": False,
-        "max_tokens": 6000,
-        "response_format": {"type": "json_object"},
-        "messages": [
-            {
-                "role": "system",
-                "content": "你只输出严格 JSON。不要输出 Markdown、解释、前后缀。",
-            },
-            {"role": "user", "content": prompt},
-        ],
-    }
-    data = json.dumps(body, ensure_ascii=False).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
-    if ai_config.api_key:
-        headers["Authorization"] = f"Bearer {ai_config.api_key}"
-    req = url_request.Request(endpoint, data=data, headers=headers, method="POST")
+    body = build_chat_body(ai_config, prompt, use_json_response_format=True)
     try:
-        with url_request.urlopen(req, timeout=ai_config.timeout) as response:
-            response_text = response.read().decode("utf-8")
-    except url_error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"AI 接口请求失败：HTTP {exc.code}，{detail[:300]}") from exc
-    except url_error.URLError as exc:
-        raise RuntimeError(f"AI 接口连接失败：{format_ai_connection_error(exc.reason)}") from exc
+        response_text = post_chat_request(endpoint, ai_config, body)
+    except RuntimeError as exc:
+        message = str(exc)
+        if "response_format" not in message and "json_object" not in message and "HTTP 400" not in message and "HTTP 422" not in message:
+            raise
+        fallback_body = build_chat_body(ai_config, prompt, use_json_response_format=False)
+        response_text = post_chat_request(endpoint, ai_config, fallback_body)
 
+    return extract_chat_content(response_text)
+
+
+def call_openai_compatible_text(
+    ai_config: AIConfig,
+    prompt: str,
+    system_prompt: str = "你是实训报告生成器的 AI 助手，请直接回答用户问题。",
+) -> str:
+    endpoint = normalize_chat_endpoint(ai_config.base_url)
+    body = build_chat_body(
+        ai_config,
+        prompt,
+        use_json_response_format=False,
+        system_prompt=system_prompt,
+        force_json_without_response_format=False,
+    )
+    response_text = post_chat_request(endpoint, ai_config, body)
+    return extract_chat_content(response_text)
+
+
+def extract_chat_content(response_text: str) -> str:
     payload = json.loads(response_text)
     choices = payload.get("choices") or []
     if not choices:
         raise RuntimeError("AI 接口没有返回 choices。")
     message = choices[0].get("message") or {}
     content = message.get("content") or choices[0].get("text") or ""
-    if not content.strip():
+    if isinstance(content, list):
+        content = "".join(str(item.get("text") or item.get("content") or "") if isinstance(item, dict) else str(item) for item in content)
+    if not str(content).strip():
         raise RuntimeError("AI 接口返回内容为空。")
-    return content
+    return str(content)
+
+
+def build_chat_body(
+    ai_config: AIConfig,
+    prompt: str,
+    use_json_response_format: bool,
+    system_prompt: str | None = None,
+    force_json_without_response_format: bool = True,
+) -> dict:
+    if system_prompt is None:
+        system_prompt = "你只输出严格 JSON。不要输出 Markdown、解释、前后缀。"
+    if not use_json_response_format and force_json_without_response_format:
+        system_prompt += " 即使接口不支持 response_format，你也必须只输出可被 json.loads 解析的 JSON 对象。"
+    body = {
+        "model": ai_config.model,
+        "temperature": ai_config.temperature,
+        "stream": False,
+        "max_tokens": 6000,
+        "messages": [
+            {
+                "role": "system",
+                "content": system_prompt,
+            },
+            {"role": "user", "content": prompt},
+        ],
+    }
+    if use_json_response_format:
+        body["response_format"] = {"type": "json_object"}
+    return body
+
+
+def post_chat_request(endpoint: str, ai_config: AIConfig, body: dict) -> str:
+    data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "ReportGenerator/1.0",
+        "HTTP-Referer": "http://127.0.0.1:8765",
+        "X-Title": "ReportGenerator",
+    }
+    if ai_config.api_key:
+        headers["Authorization"] = f"Bearer {ai_config.api_key}"
+    req = url_request.Request(endpoint, data=data, headers=headers, method="POST")
+    attempts = build_network_attempts(ai_config)
+    errors: list[str] = []
+    last_error: Exception | None = None
+
+    for label, proxy in attempts:
+        try:
+            opener = build_url_opener(proxy)
+            with opener.open(req, timeout=ai_config.timeout) as response:
+                if proxy:
+                    add_ai_usage_event(f"AI 网络通道：{label}（{proxy}）")
+                else:
+                    add_ai_usage_event("AI 网络通道：直连")
+                return response.read().decode("utf-8")
+        except url_error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"AI 接口请求失败：HTTP {exc.code}，{detail[:500]}") from exc
+        except url_error.URLError as exc:
+            last_error = exc
+            errors.append(f"{label}：{format_ai_connection_error(exc.reason, concise=True)}")
+            continue
+
+    detail = "；".join(errors) if errors else "没有可用网络通道。"
+    raise RuntimeError(f"AI 接口连接失败：已尝试 {len(attempts)} 个网络通道，{detail}") from last_error
+
+
+def build_url_opener(proxy_url: str = ""):
+    if proxy_url:
+        return url_request.build_opener(url_request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
+    return url_request.build_opener(url_request.ProxyHandler({}))
+
+
+def build_network_attempts(ai_config: AIConfig) -> list[tuple[str, str]]:
+    explicit_proxy = normalize_proxy_url(ai_config.proxy_url)
+    if explicit_proxy:
+        return [(f"网页自定义代理", explicit_proxy)]
+
+    attempts: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for label, proxy in detect_proxy_routes():
+        if proxy and proxy not in seen:
+            attempts.append((label, proxy))
+            seen.add(proxy)
+    attempts.append(("直连", ""))
+    return attempts
+
+
+def normalize_proxy_url(proxy_url: str) -> str:
+    proxy_url = (proxy_url or "").strip()
+    if not proxy_url:
+        return ""
+    if "://" not in proxy_url:
+        proxy_url = f"http://{proxy_url}"
+    parsed = urlparse(proxy_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or not parsed.port:
+        raise ValueError("当前工具只支持 HTTP/HTTPS 代理，请填写类似 http://127.0.0.1:7890 的代理地址。")
+    return proxy_url
+
+
+def detect_proxy_routes() -> list[tuple[str, str]]:
+    routes: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    for key, value in url_request.getproxies().items():
+        if key.lower() in {"http", "https", "all"}:
+            try:
+                proxy = normalize_proxy_url(value)
+            except ValueError:
+                continue
+            if proxy and proxy not in seen:
+                routes.append((f"系统/环境代理 {key}", proxy))
+                seen.add(proxy)
+
+    for host in COMMON_LOCAL_PROXY_HOSTS:
+        for port in COMMON_LOCAL_PROXY_PORTS:
+            if is_tcp_port_open(host, port):
+                proxy = f"http://{host}:{port}"
+                if proxy not in seen:
+                    routes.append((f"本地代理端口 {host}:{port}", proxy))
+                    seen.add(proxy)
+    return routes
+
+
+def is_tcp_port_open(host: str, port: int, timeout: float = 0.25) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def probe_url_connectivity(base_url: str, proxy_url: str = "", timeout: int = 8) -> dict:
+    endpoint = normalize_chat_endpoint(base_url)
+    req = url_request.Request(endpoint, headers={"User-Agent": "ReportGenerator/1.0"}, method="GET")
+    attempts = [("网页自定义代理", normalize_proxy_url(proxy_url))] if proxy_url else build_network_attempts(AIConfig())
+    results = []
+    for label, proxy in attempts:
+        try:
+            opener = build_url_opener(proxy)
+            with opener.open(req, timeout=timeout) as response:
+                return {"ok": True, "label": label, "proxy": proxy, "status": response.status, "message": "网络通道可达。"}
+        except url_error.HTTPError as exc:
+            if exc.code in {400, 401, 403, 404, 405, 422, 429}:
+                return {"ok": True, "label": label, "proxy": proxy, "status": exc.code, "message": f"网络通道可达，接口返回 HTTP {exc.code}。"}
+            results.append(f"{label}: HTTP {exc.code}")
+        except Exception as exc:  # noqa: BLE001 - 检测接口要返回每条通道的错误
+            results.append(f"{label}: {format_ai_connection_error(getattr(exc, 'reason', exc), concise=True)}")
+    return {"ok": False, "label": "", "proxy": "", "status": 0, "message": "；".join(results) or "网络不可达。"}
 
 
 def normalize_chat_endpoint(base_url: str) -> str:
@@ -698,13 +911,16 @@ def normalize_chat_endpoint(base_url: str) -> str:
     return f"{base_url}/chat/completions"
 
 
-def format_ai_connection_error(reason) -> str:
+def format_ai_connection_error(reason, concise: bool = False) -> str:
     reason_text = str(reason)
     if "10013" in reason_text:
+        if concise:
+            return f"{reason_text}。Windows 拒绝 socket 连接，请使用代理或放行 {sys.executable}。"
         return (
             f"{reason_text}。这是 Windows 拒绝外网 socket 连接的错误，通常不是 API Key 写错。"
-            "请优先关闭当前网页服务窗口后，双击“启动实训报告网页.bat”重新启动；"
-            "如果仍失败，请在 Windows 防火墙/杀毒软件里允许 python.exe 访问网络，并检查 VPN/代理是否拦截了 https://api.deepseek.com。"
+            f"当前服务实际使用的 Python 是：{sys.executable}。"
+            "程序会自动尝试系统代理和常见 Clash/V2Ray 端口；如果仍失败，请确认代理软件已开启，"
+            "或在网页 AI 配置里填写代理地址，例如 http://127.0.0.1:7890。"
         )
     if "getaddrinfo failed" in reason_text or "Name or service not known" in reason_text:
         return f"{reason_text}。请检查 AI API 地址是否填写正确，以及网络/DNS 是否可用。"
@@ -730,6 +946,9 @@ def merge_ai_payload_into_report(fallback: DayReport, payload: dict, max_tasks: 
     goals = sanitize_string_list(payload.get("goals"), fallback.goals, 7)
     topics = sanitize_string_list(payload.get("topics"), fallback.topics, 24)
     details = sanitize_string_list(payload.get("details"), fallback.details, 10)
+
+    if not fallback.tasks:
+        return DayReport(fallback.source, fallback.day_index, title, goals, topics, details, [])
 
     tasks: list[TaskItem] = []
     for item in payload.get("tasks") or []:
@@ -763,6 +982,7 @@ def sanitize_string_list(value, fallback: list[str], limit: int) -> list[str]:
 
 def clear_generation_warnings() -> None:
     GENERATION_WARNINGS.clear()
+    AI_USAGE_EVENTS.clear()
 
 
 def add_generation_warning(message: str) -> None:
@@ -774,23 +994,487 @@ def get_generation_warnings() -> list[str]:
     return GENERATION_WARNINGS[:]
 
 
-def diversify_day_report(report: DayReport, raw_text: str, variation_seed: str = "") -> DayReport:
-    seed_text = variation_seed or f"{report.source.name}-{report.day_index}-{datetime.now().isoformat(timespec='microseconds')}"
-    digest = hashlib.sha256((seed_text + raw_text[:2000]).encode("utf-8", errors="ignore")).hexdigest()
-    rng = random.Random(int(digest[:16], 16))
+def add_ai_usage_event(message: str) -> None:
+    if message and message not in AI_USAGE_EVENTS:
+        AI_USAGE_EVENTS.append(message)
 
-    goals = [vary_sentence(goal, rng, "goal", index) for index, goal in enumerate(report.goals)]
-    details = [vary_sentence(detail, rng, "detail", index) for index, detail in enumerate(report.details)]
+
+def get_ai_usage_events() -> list[str]:
+    return AI_USAGE_EVENTS[:]
+
+
+VARIATION_PROFILES = [
+    {
+        "name": "概念梳理",
+        "goal_prefix": "围绕概念理解和语法辨析",
+        "detail_focus": "重点放在概念边界、语法格式和适用场景的整理上",
+        "task_prefix": "从概念验证角度完成",
+    },
+    {
+        "name": "实践应用",
+        "goal_prefix": "结合课堂示例和实际操作",
+        "detail_focus": "更关注输入、处理、输出之间的衔接和程序运行效果",
+        "task_prefix": "从实际应用角度实现",
+    },
+    {
+        "name": "调试反思",
+        "goal_prefix": "通过编写、运行和调试程序",
+        "detail_focus": "侧重理解容易出错的位置、运行结果观察和代码调整过程",
+        "task_prefix": "在调试验证过程中完成",
+    },
+    {
+        "name": "归纳迁移",
+        "goal_prefix": "在归纳课堂知识的基础上",
+        "detail_focus": "强调知识点之间的联系，以及后续任务中的迁移使用",
+        "task_prefix": "围绕知识迁移要求完成",
+    },
+    {
+        "name": "课堂记录",
+        "goal_prefix": "结合课堂笔记中的操作记录",
+        "detail_focus": "侧重把老师讲解、个人理解和实际操作步骤串联起来",
+        "task_prefix": "按照课堂记录中的练习要求完成",
+    },
+    {
+        "name": "问题解决",
+        "goal_prefix": "围绕具体问题的拆解和实现",
+        "detail_focus": "重点说明从题目要求到程序思路再到运行验证的完整过程",
+        "task_prefix": "从问题拆解和结果验证角度完成",
+    },
+    {
+        "name": "能力提升",
+        "goal_prefix": "在巩固基础语法的同时",
+        "detail_focus": "突出独立编写代码、检查结果和总结方法的能力提升",
+        "task_prefix": "围绕能力训练目标完成",
+    },
+    {
+        "name": "应用扩展",
+        "goal_prefix": "联系实际应用场景",
+        "detail_focus": "更多关注知识点可以怎样组合成可用的小功能",
+        "task_prefix": "结合应用扩展思路完成",
+    },
+]
+
+TOPIC_VARIANT_BANK = {
+    "实训规划与注意事项": ["实训安排与学习规范", "实训流程和注意事项", "阶段任务与报告要求"],
+    "Python编程语言与业务应用": ["Python工具认知与应用方向", "Python编程环境和业务场景", "Python在数据处理中的应用"],
+    "数据类型书写与元素访问": ["常用数据类型与元素访问", "数据类型表达和索引访问", "序列、映射与集合基础"],
+    "输入输出命令": ["交互式输入与格式化输出", "input与print基础交互", "程序输入输出流程"],
+    "字符串大小写转换": ["字符串大小写处理", "英文字符串格式统一", "upper与lower方法应用"],
+    "字符串查找与统计": ["文本查找与次数统计", "find与count文本处理", "字符串检索和简单统计"],
+    "字符串替换": ["字符串内容替换", "replace文本修改", "文本批量替换处理"],
+    "字符串去空": ["字符串空白清理", "strip方法与输入清洗", "文本首尾字符处理"],
+    "字符串拆分与组合": ["字符串拆分和拼接", "split与join结构转换", "文本列表化与重组"],
+    "字符串类型测试": ["字符串格式判断", "字符类型检测方法", "文本合法性校验"],
+    "字符编码转换": ["字符编码与转换", "ord和chr编码理解", "字符与编码值互转"],
+    "运算符和表达式": ["表达式计算和运算符", "算术关系与逻辑表达", "程序计算基础"],
+    "选择结构": ["条件判断结构", "if分支逻辑", "多分支程序流程"],
+    "循环结构": ["循环流程控制", "for与while重复执行", "循环结构及嵌套应用"],
+    "break与continue": ["循环跳转控制", "break和continue流程调整", "循环提前结束与跳过"],
+    "模块导入": ["模块导入与库函数调用", "import语句使用", "标准库功能扩展"],
+    "函数定义与调用": ["函数封装与调用", "def语句和函数复用", "函数化程序设计"],
+    "函数返回值": ["return返回结果", "函数结果传递", "返回值与调用位置"],
+    "函数参数传递": ["形参与实参传递", "函数参数设计", "参数输入和结果计算"],
+    "变量作用域": ["局部变量与全局变量", "变量可见范围", "函数内外变量作用域"],
+    "文件读写命令": ["文本文件读写", "with open文件处理", "文件创建、写入和读取"],
+    "文件路径": ["绝对路径与相对路径", "文件定位方式", "程序运行目录和路径"],
+}
+
+DETAIL_VARIANT_BANK = {
+    "输入输出命令": [
+        "本部分把 input() 获取数据和 print() 输出结果联系起来，适合完成带提示语的交互式小程序。",
+        "输入输出是课堂练习的入口和出口，写程序时要注意提示信息清楚、变量接收正确、结果表达完整。",
+        "通过输入输出命令可以观察程序运行过程，也能检查变量内容是否按照预期完成传递。",
+    ],
+    "数据类型书写与元素访问": [
+        "数据类型决定了数据的组织方式，列表、元组、字典和集合在访问元素时各有不同规则。",
+        "本部分重点在于区分字符串、数值、列表、字典等对象，并掌握下标、键和值之间的访问关系。",
+        "理解数据类型后，后续进行循环遍历、条件判断和函数传参时会更容易确定处理对象。",
+    ],
+    "循环结构": [
+        "循环结构用于重复执行相似操作，for 更适合固定次数或遍历序列，while 更适合条件控制。",
+        "循环练习要关注循环变量变化、循环条件是否正确，以及嵌套循环中内外层的执行顺序。",
+        "通过循环可以减少重复代码，也能完成乘法表、累计求和、数据遍历等典型任务。",
+    ],
+    "函数定义与调用": [
+        "函数把重复功能封装成独立代码块，调用时只需要提供必要参数即可得到对应处理结果。",
+        "本部分强调 def 定义、参数接收、函数体执行和调用位置之间的关系。",
+        "使用函数能提升程序结构清晰度，也方便在多个任务中复用同一段处理逻辑。",
+    ],
+    "文件读写命令": [
+        "文件读写把程序运行结果保存到外部文本中，适合记录学习内容、保存数据或读取已有资料。",
+        "使用 with open() 时需要关注打开模式和编码方式，避免因为路径或编码问题导致读取失败。",
+        "本部分练习体现了程序和文件之间的数据交换过程，是后续项目保存结果的基础。",
+    ],
+    "选择结构": [
+        "选择结构根据条件表达式决定执行路径，适合处理成绩判断、权限判断和输入合法性判断等问题。",
+        "编写分支程序时要注意条件顺序，避免前面的条件覆盖后面更具体的判断。",
+        "if、elif、else 能让程序具备基本决策能力，是交互式程序中常见的流程控制方式。",
+    ],
+    "字符串拆分与组合": [
+        "split() 能把结构化文本拆成列表，join() 则可以把多个片段重新组织成指定格式的字符串。",
+        "文本拆分和组合常用于处理姓名、电话、字段信息等内容，是简单数据清洗的基础。",
+        "本部分体现了字符串和列表之间的转换关系，能帮助理解文本结构化处理过程。",
+    ],
+    "字符串查找与统计": [
+        "find() 和 count() 可以快速定位关键词并统计出现次数，适合进行简单文本分析。",
+        "查找和统计方法能帮助观察字符串内部内容，为替换、切分和清洗操作提供依据。",
+        "本部分练习强调返回值含义，例如 find() 找不到时返回 -1，count() 返回匹配次数。",
+    ],
+}
+
+
+GOAL_REWRITE_TEMPLATES = [
+    "{prefix}，理解{body}，并能结合课堂示例说明其使用方法。",
+    "在本次学习中，{focus}，进一步掌握{body}。",
+    "通过笔记整理和程序验证，形成对{body}的基本认识和应用能力。",
+    "围绕当天知识点，能够把{body}转化为可运行、可检查的实践过程。",
+    "从课堂讲解到课后整理，逐步明确{body}的使用条件、书写方法和常见注意点。",
+    "能够根据笔记内容提炼{body}，并把相关知识点和实际练习联系起来。",
+    "以小程序实现为落点，掌握{body}在输入、处理、输出流程中的作用。",
+    "在理解语法规则的同时，能够结合运行结果判断{body}是否被正确使用。",
+    "通过对示例代码的拆解，梳理{body}的操作步骤，并提升独立编写程序的能力。",
+    "把{body}放到实际问题中理解，能够根据任务要求选择合适的实现方式。",
+]
+
+DETAIL_REWRITE_TEMPLATES = [
+    "{body}，这一部分在报告中从{focus}展开说明。",
+    "课堂内容不是孤立记忆，{body}，需要结合示例运行结果一起理解。",
+    "从学习过程看，{body}，后续写代码时要注意步骤衔接和结果验证。",
+    "{body}，这一知识点可以和当天其他内容组合起来完成小型程序练习。",
+    "围绕该知识点，课堂上既关注语法写法，也关注实际运行后的输出表现：{body}。",
+    "在整理报告时，可将其理解为“概念说明、代码实现、结果观察”三步：{body}。",
+    "{body}，这类内容适合通过多写几组示例来比较不同写法之间的差别。",
+    "本部分的学习重点不只是记住命令，还要能说明命令为什么这样写、运行后会得到什么结果：{body}。",
+    "从任务完成角度看，{body}，它能帮助后续练习更快定位输入、变量和输出之间的关系。",
+    "{body}，报告中需要把知识点和课堂练习连接起来，避免只停留在概念罗列。",
+]
+
+TASK_REWRITE_TEMPLATES = [
+    "{prefix}：{body}。",
+    "根据课堂任务要求，{body}，并观察程序输出是否正确。",
+    "围绕本题要求编写 Python 程序，实现{body}。",
+    "在 PyCharm 中完成代码编写和运行验证，任务内容为：{body}。",
+    "按照题目描述先确定输入和处理步骤，再用 Python 完成{body}。",
+    "本练习需要把课堂知识点落实到代码中，完成{body}并保留运行结果。",
+    "根据笔记中的练习要求，设计变量、语句和输出格式，完成{body}。",
+    "先分析任务需要哪些数据，再编写程序实现{body}，最后检查输出内容。",
+    "结合当天知识点完成一个可运行示例，具体要求是：{body}。",
+    "将题目要求拆分为数据准备、逻辑处理和结果展示三个部分，完成{body}。",
+]
+
+SUMMARY_LINK_TEMPLATES = [
+    "结合原始笔记中的“{note}”，本次报告从{focus}进行整理。",
+    "原 TXT 中提到“{note}”，报告将其放入当天知识点体系中重新归纳。",
+    "围绕笔记记录的“{note}”，本次内容更强调理解、练习和运行结果之间的对应关系。",
+    "从“{note}”这一记录可以看出，当天学习重点需要和程序实践结合起来说明。",
+]
+
+CONNECTOR_POOL = ["同时", "另外", "进一步看", "从课堂记录看", "在实际练习中", "整理笔记时", "结合运行结果", "换一个角度看"]
+
+MODULE_ORDER_STRATEGIES = ["keep", "rotate", "shuffle-middle", "reverse-pairs"]
+
+PERSONAL_NOTE_TEMPLATES = [
+    "结合个人补充要求“{note}”，本次报告在表述时更偏向{focus}。",
+    "根据用户补充的“{note}”，相关内容会适当突出课堂理解和个人整理过程。",
+    "围绕“{note}”这一补充方向，报告会把知识点、练习和运行结果联系得更紧一些。",
+]
+
+SECTION_CLOSING_TEMPLATES = [
+    "整体来看，这部分内容更适合通过“知识点整理加代码验证”的方式掌握。",
+    "因此，本部分不只记录概念，还需要把课堂操作过程和结果截图结合起来说明。",
+    "从实训报告角度看，重点在于说明自己如何理解、如何实现以及如何检查结果。",
+    "后续练习中，可以继续围绕这些知识点做小规模迁移应用。",
+]
+
+GOAL_BOUNDARY_TEMPLATES = [
+    "本次实训先从课堂笔记中的关键内容入手，重点掌握{body}。",
+    "围绕当天学习内容，首要目标是把{body}和具体练习过程对应起来。",
+    "从个人整理角度看，本次需要先明确{body}，再结合程序运行结果进行验证。",
+    "在本次课程记录中，{body}是后续理解代码示例的重要基础。",
+]
+
+DETAIL_BOUNDARY_TEMPLATES = [
+    "作为内容详情的展开，{body}",
+    "换一个角度理解，{body}",
+    "结合课堂操作过程，{body}",
+    "从问题分析角度看，{body}",
+]
+
+REPETITION_THRESHOLD = 0.22
+MAX_DIVERSIFY_ATTEMPTS = 8
+
+
+def diversify_day_report(
+    report: DayReport,
+    raw_text: str,
+    variation_seed: str = "",
+    ai_enhanced: bool = False,
+    personal_note: str = "",
+) -> DayReport:
+    seed_text = variation_seed or f"{report.source.name}-{report.day_index}-{datetime.now().isoformat(timespec='microseconds')}"
+    best_report = report
+    best_score = 1.0
+    for attempt in range(MAX_DIVERSIFY_ATTEMPTS):
+        candidate = build_diversified_report_once(
+            report=report,
+            raw_text=raw_text,
+            seed_text=f"{seed_text}-{attempt}",
+            ai_enhanced=ai_enhanced,
+            personal_note=personal_note,
+        )
+        score = ngram_repetition_rate(report_text_for_repetition(candidate), n=6)
+        if score < best_score:
+            best_report = candidate
+            best_score = score
+        if score <= REPETITION_THRESHOLD and not has_repeated_openings(candidate.goals + candidate.details):
+            return candidate
+    return best_report
+
+
+def build_diversified_report_once(
+    report: DayReport,
+    raw_text: str,
+    seed_text: str,
+    ai_enhanced: bool,
+    personal_note: str,
+) -> DayReport:
+    digest = hashlib.sha256((seed_text + raw_text[:2000] + personal_note).encode("utf-8", errors="ignore")).hexdigest()
+    rng = random.Random(int(digest[:16], 16))
+    profile = VARIATION_PROFILES[rng.randrange(len(VARIATION_PROFILES))]
+
+    if ai_enhanced:
+        goals = postprocess_module_items(unique_keep_order(report.goals)[:7], rng, personal_note, profile, "goal")
+        topics = reshape_item_order(unique_keep_order(report.topics)[:24], rng)
+        details = postprocess_module_items(unique_keep_order(report.details)[:10], rng, personal_note, profile, "detail")
+        tasks = [
+            TaskItem(
+                title=cleanup_heading(task.title),
+                requirement=vary_task_requirement(cleanup_requirement(task.requirement), rng, profile, index),
+                code=diversify_code(task.code, rng, index),
+                caption=cleanup_caption(task.caption or task.title),
+            )
+            for index, task in enumerate(report.tasks)
+        ]
+        return DayReport(
+            report.source,
+            report.day_index,
+            report.title,
+            goals,
+            topics,
+            details,
+            tasks,
+        )
+
+    topics = diversify_topics(report.topics, raw_text, rng, profile)
+    goals = diversify_goals(report.goals, topics, rng, profile)
+    details = diversify_details(report.details, report.topics, raw_text, rng, profile)
+    goals = postprocess_module_items(goals, rng, personal_note, profile, "goal")
+    topics = reshape_item_order(topics, rng)
+    details = postprocess_module_items(details, rng, personal_note, profile, "detail")
     tasks = [
         TaskItem(
             title=task.title,
-            requirement=vary_sentence(task.requirement, rng, "requirement", index),
+            requirement=vary_task_requirement(task.requirement, rng, profile, index),
             code=diversify_code(task.code, rng, index),
             caption=task.caption,
         )
         for index, task in enumerate(report.tasks)
     ]
-    return DayReport(report.source, report.day_index, report.title, goals, report.topics, details, tasks)
+    return DayReport(report.source, report.day_index, report.title, goals, topics, details, tasks)
+
+
+def postprocess_module_items(
+    items: list[str],
+    rng: random.Random,
+    personal_note: str,
+    profile: dict,
+    role: str,
+) -> list[str]:
+    result = reshape_item_order(unique_keep_order(items), rng)
+    result = vary_module_boundaries(result, rng, role)
+    result = avoid_adjacent_same_opening(result, rng, role)
+    if personal_note.strip() and result:
+        note = cleanup_heading(personal_note.strip())[:80]
+        template = PERSONAL_NOTE_TEMPLATES[rng.randrange(len(PERSONAL_NOTE_TEMPLATES))]
+        insert_at = rng.randrange(min(len(result), 3) + 1)
+        result.insert(insert_at, template.format(note=note, focus=profile["detail_focus"]))
+    if role == "detail" and result and rng.random() < 0.55:
+        result.append(SECTION_CLOSING_TEMPLATES[rng.randrange(len(SECTION_CLOSING_TEMPLATES))])
+    return unique_keep_order(result)[:10 if role == "detail" else 7]
+
+
+def vary_module_boundaries(items: list[str], rng: random.Random, role: str) -> list[str]:
+    if not items:
+        return items
+    result = items[:]
+    if role == "goal":
+        body = normalize_goal_body(result[0])
+        template = GOAL_BOUNDARY_TEMPLATES[rng.randrange(len(GOAL_BOUNDARY_TEMPLATES))]
+        result[0] = template.format(body=body)
+    elif role == "detail":
+        body = normalize_sentence_body(result[0].rstrip("。；; "), "detail")
+        template = DETAIL_BOUNDARY_TEMPLATES[rng.randrange(len(DETAIL_BOUNDARY_TEMPLATES))]
+        result[0] = template.format(body=body).rstrip("。") + "。"
+    return result
+
+
+def reshape_item_order(items: list[str], rng: random.Random) -> list[str]:
+    if len(items) <= 2:
+        return items[:]
+    strategy = MODULE_ORDER_STRATEGIES[rng.randrange(len(MODULE_ORDER_STRATEGIES))]
+    result = items[:]
+    if strategy == "rotate":
+        offset = rng.randrange(1, len(result))
+        result = result[offset:] + result[:offset]
+    elif strategy == "shuffle-middle":
+        middle = result[1:-1]
+        rng.shuffle(middle)
+        result = [result[0], *middle, result[-1]]
+    elif strategy == "reverse-pairs":
+        for index in range(0, len(result) - 1, 2):
+            if rng.random() < 0.65:
+                result[index], result[index + 1] = result[index + 1], result[index]
+    return result
+
+
+def avoid_adjacent_same_opening(items: list[str], rng: random.Random, role: str) -> list[str]:
+    if len(items) < 2:
+        return items
+    result = items[:]
+    for index in range(1, len(result)):
+        if sentence_opening(result[index]) == sentence_opening(result[index - 1]):
+            body = normalize_sentence_body(result[index].rstrip("。；; "), role)
+            connector = CONNECTOR_POOL[(rng.randrange(len(CONNECTOR_POOL)) + index) % len(CONNECTOR_POOL)]
+            result[index] = f"{connector}，{body}。"
+    return result
+
+
+def sentence_opening(text: str, width: int = 6) -> str:
+    clean = re.sub(r"^[（(]\d+[)）]\s*", "", text.strip())
+    clean = re.sub(r"^[一二三四五六七八九十]+[、.．]\s*", "", clean)
+    return clean[:width]
+
+
+def has_repeated_openings(items: list[str]) -> bool:
+    openings = [sentence_opening(item) for item in items if item.strip()]
+    return len(openings) != len(set(openings))
+
+
+def report_text_for_repetition(report: DayReport) -> str:
+    parts = [report.title, *report.goals, *report.topics, *report.details]
+    for task in report.tasks:
+        parts.extend([task.title, task.requirement, task.code])
+    return "\n".join(parts)
+
+
+def ngram_repetition_rate(text: str, n: int = 6) -> float:
+    clean = re.sub(r"\s+", "", text)
+    if len(clean) <= n:
+        return 0.0
+    grams = [clean[index : index + n] for index in range(len(clean) - n + 1)]
+    if not grams:
+        return 0.0
+    repeated = len(grams) - len(set(grams))
+    return repeated / len(grams)
+
+
+def diversify_topics(topics: list[str], raw_text: str, rng: random.Random, profile: dict) -> list[str]:
+    varied: list[str] = []
+    for index, topic in enumerate(topics):
+        variants = TOPIC_VARIANT_BANK.get(topic, [topic])
+        varied.append(variants[(rng.randrange(len(variants)) + index) % len(variants)])
+
+    extra_topics = infer_contextual_topics(raw_text, rng, profile)
+    insert_at = rng.randrange(len(varied) + 1) if varied else 0
+    varied[insert_at:insert_at] = extra_topics[:2]
+    result = unique_keep_order(varied)
+    return result[:24] or topics
+
+
+def infer_contextual_topics(raw_text: str, rng: random.Random, profile: dict) -> list[str]:
+    lowered = raw_text.lower()
+    candidates: list[str] = []
+    if "pycharm" in lowered or "运行" in raw_text or "print" in lowered:
+        candidates.extend(["程序运行与结果观察", "代码调试和输出验证"])
+    if "input" in lowered or "输入" in raw_text:
+        candidates.extend(["数据输入和变量接收", "交互提示语设计"])
+    if "列表" in raw_text or "字典" in raw_text or "元组" in raw_text or "集合" in raw_text:
+        candidates.extend(["容器类型对比", "数据组织方式"])
+    if "函数" in raw_text or "def" in lowered:
+        candidates.extend(["函数封装思路", "功能模块化表达"])
+    if "文件" in raw_text or "open" in lowered:
+        candidates.extend(["文件数据保存", "读写流程验证"])
+    if "调试" in raw_text or profile["name"] == "调试反思":
+        candidates.extend(["错误排查和运行验证", "代码调整过程"])
+    rng.shuffle(candidates)
+    return unique_keep_order(candidates)
+
+
+def diversify_goals(goals: list[str], topics: list[str], rng: random.Random, profile: dict) -> list[str]:
+    source = goals[:] or ["梳理课堂知识点，理解相关语法并完成必要的实践记录。"]
+    result: list[str] = []
+    for index, goal in enumerate(source[:5]):
+        body = normalize_goal_body(goal)
+        template = GOAL_REWRITE_TEMPLATES[(rng.randrange(len(GOAL_REWRITE_TEMPLATES)) + index) % len(GOAL_REWRITE_TEMPLATES)]
+        result.append(template.format(prefix=profile["goal_prefix"], focus=profile["detail_focus"], body=body))
+
+    if topics:
+        topic_sample = "、".join(topics[: min(3, len(topics))])
+        closing_templates = [
+            "能够围绕{topics}等内容完成归纳整理，并在后续练习中灵活迁移使用。",
+            "能够把{topics}等知识点放到同一学习脉络中理解，形成较完整的课堂记录。",
+            "能够根据{topics}等内容整理出学习重点，并用代码运行结果进行辅助说明。",
+            "能够从{topics}等知识点出发，分析其在课堂练习和实训报告中的呈现方式。",
+        ]
+        closing = closing_templates[rng.randrange(len(closing_templates))]
+        result.append(closing.format(topics=topic_sample))
+    return unique_keep_order(result)[:7]
+
+
+def normalize_goal_body(goal: str) -> str:
+    body = normalize_sentence_body(goal.strip().rstrip("。；; "), "goal")
+    body = re.sub(r"^(能够|可以|能|掌握|理解|认识|了解)", "", body).strip("，,：: ")
+    return body or goal.strip().rstrip("。；; ")
+
+
+def diversify_details(
+    details: list[str],
+    original_topics: list[str],
+    raw_text: str,
+    rng: random.Random,
+    profile: dict,
+) -> list[str]:
+    result: list[str] = []
+    topic_pool = original_topics[:] or extract_topics(raw_text)
+
+    for index, topic in enumerate(topic_pool[:5]):
+        variants = DETAIL_VARIANT_BANK.get(topic)
+        if variants:
+            result.append(variants[(rng.randrange(len(variants)) + index) % len(variants)])
+
+    for index, detail in enumerate(details):
+        result.append(rewrite_detail_sentence(detail, rng, profile, index))
+
+    note_lines = extract_original_knowledge(raw_text, limit=360).splitlines()
+    if note_lines:
+        selected = note_lines[rng.randrange(len(note_lines))]
+        if 8 <= len(selected) <= 80:
+            template = SUMMARY_LINK_TEMPLATES[rng.randrange(len(SUMMARY_LINK_TEMPLATES))]
+            result.append(template.format(note=cleanup_heading(selected), focus=profile["detail_focus"]))
+
+    return unique_keep_order(result)[:10] or details
+
+
+def rewrite_detail_sentence(text: str, rng: random.Random, profile: dict, index: int) -> str:
+    body = normalize_sentence_body(text.strip().rstrip("。；; "), "detail")
+    template = DETAIL_REWRITE_TEMPLATES[(rng.randrange(len(DETAIL_REWRITE_TEMPLATES)) + index) % len(DETAIL_REWRITE_TEMPLATES)]
+    return template.format(body=body, focus=profile["detail_focus"])
+
+
+def vary_task_requirement(text: str, rng: random.Random, profile: dict, index: int) -> str:
+    body = normalize_sentence_body(text.strip().rstrip("。；; "), "requirement")
+    template = TASK_REWRITE_TEMPLATES[(rng.randrange(len(TASK_REWRITE_TEMPLATES)) + index) % len(TASK_REWRITE_TEMPLATES)]
+    return template.format(prefix=profile["task_prefix"], body=body)
 
 
 def vary_sentence(text: str, rng: random.Random, role: str, index: int) -> str:
@@ -837,6 +1521,9 @@ def normalize_sentence_body(text: str, role: str) -> str:
 
 
 def diversify_code(code: str, rng: random.Random, index: int) -> str:
+    variant = choose_structural_code_variant(code, rng, index)
+    if variant:
+        code = variant
     replacements = {
         "小明": ["小林", "小周", "小华", "小陈"],
         "小花": ["小雅", "小雪", "小敏", "小雨"],
@@ -857,12 +1544,277 @@ def diversify_code(code: str, rng: random.Random, index: int) -> str:
         ],
         "练习本": ["练习本", "笔记本", "中性笔", "资料册"],
         "Python编程语言": ["Python编程语言", "暑期实训", "数据分析基础", "课堂练习"],
+        "13444444444": ["13444444444", "13600001234", "15812345678", "17788889999"],
+        "23060101": ["23060101", "23060102", "计科1", "软件2"],
     }
     result = code
     for old, values in replacements.items():
         if old in result:
             choice = values[(rng.randrange(len(values)) + index) % len(values)]
             result = result.replace(old, choice)
+    result = diversify_code_variables(result, rng, index)
+    return result
+
+
+def choose_structural_code_variant(code: str, rng: random.Random, index: int) -> str:
+    variants: list[str] = []
+    if "请输入用户名" in code and "upper" in code:
+        variants = [
+            """
+            username = input("请输入用户名（包含数字、字母、下划线，长度为8）：")
+            valid_chars = [char.isalnum() or char == "_" for char in username]
+
+            if len(username) == 8 and all(valid_chars):
+                print("转换后的用户名：", username.upper())
+            else:
+                print("用户名格式不符合要求")
+            """,
+            """
+            import re
+
+            account = input("请输入用户名（8位字母数字或下划线）：")
+            pattern = r"^[A-Za-z0-9_]{8}$"
+
+            if re.fullmatch(pattern, account):
+                print("用户名大写结果：{}".format(account.upper()))
+            else:
+                print("输入的用户名不符合要求")
+            """,
+            """
+            login_name = input("请输入用户名：")
+            length_ok = len(login_name) == 8
+            symbol_ok = login_name.replace("_", "").isalnum()
+
+            print("校验结果：", "通过" if length_ok and symbol_ok else "未通过")
+            if length_ok and symbol_ok:
+                print("大写形式：", login_name.upper())
+            """,
+        ]
+    elif "请输入班级" in code and "请输入组别" in code and "请输入姓名" in code:
+        variants = [
+            """
+            class_name = input("请输入班级：")
+            group = input("请输入组别：")
+            name = input("请输入姓名：")
+
+            print(f"我是{class_name}班的学生，我是第{group}组，我的姓名是：{name}")
+            """,
+            """
+            info = {}
+            info["班级"] = input("请输入班级：")
+            info["组别"] = input("请输入组别：")
+            info["姓名"] = input("请输入姓名：")
+
+            print("学生信息：{}，{}，{}".format(info["班级"], info["组别"], info["姓名"]))
+            """,
+            """
+            prompts = ["班级", "组别", "姓名"]
+            values = [input(f"请输入{item}：") for item in prompts]
+            class_no, team_no, student = values
+
+            print(f"{student}来自{class_no}，所在小组为{team_no}。")
+            """,
+        ]
+    elif "calc_total" in code or ("请输入商品名称" in code and "请输入商品单价" in code):
+        variants = [
+            """
+            def calc_total(price, count):
+                return price * count
+
+
+            goods_name = input("请输入商品名称：")
+            price = float(input("请输入商品单价："))
+            count = int(input("请输入购买数量："))
+            total_money = calc_total(price, count)
+
+            print(f"{goods_name}的总价为：{total_money:.2f}元")
+            """,
+            """
+            def get_amount(unit_price, quantity):
+                amount = unit_price * quantity
+                return amount
+
+
+            product_name = input("请输入商品名称：")
+            single_price = float(input("请输入商品单价："))
+            buy_count = int(input("请输入购买数量："))
+
+            print("{}共需支付{:.2f}元".format(product_name, get_amount(single_price, buy_count)))
+            """,
+            """
+            item_name = input("请输入商品名称：")
+            goods_price = float(input("请输入商品单价："))
+            goods_count = int(input("请输入购买数量："))
+            pay_money = goods_price * goods_count
+
+            print("商品：", item_name)
+            print("应付金额：", round(pay_money, 2), "元")
+            """,
+        ]
+    elif "range(1, 10)" in code and ("*{i}" in code or "*{row}" in code or "*{col}" in code):
+        variants = [
+            """
+            for row in range(1, 10):
+                for col in range(1, row + 1):
+                    print(f"{col}*{row}={row * col}", end="\\t")
+                print()
+            """,
+            """
+            for i in range(1, 10):
+                line = []
+                for j in range(1, i + 1):
+                    line.append(f"{j}×{i}={i * j}")
+                print("\\t".join(line))
+            """,
+            """
+            rows = []
+            for number in range(1, 10):
+                rows.append("\\t".join(f"{left}*{number}={left * number}" for left in range(1, number + 1)))
+
+            print("\\n".join(rows))
+            """,
+        ]
+    elif "split(" in code and "join(" in code:
+        variants = [
+            """
+            message = "姓名:小花，年龄:20，性别:女，电话:13444444444"
+            parts = message.split("，")
+            final_text = "+".join(parts)
+
+            print("拆分后的列表：", parts)
+            print("组合后的字符串：", final_text)
+            """,
+            """
+            source_text = "姓名:小花，年龄:20，性别:女，电话:13444444444"
+            info_items = source_text.split("，")
+
+            for index, item in enumerate(info_items, start=1):
+                print(f"第{index}项：{item}")
+            print("连接结果：", " | ".join(info_items))
+            """,
+            """
+            raw_info = "姓名:小花，年龄:20，性别:女，电话:13444444444"
+            fields = raw_info.split("，")
+            output_text = ",".join(fields)
+
+            print(fields)
+            print(output_text)
+            """,
+        ]
+    elif "类型为" in code and "samples" in code:
+        variants = [
+            """
+            samples = [
+                ("字符类型", "Python编程语言"),
+                ("数值类型", 2026),
+                ("布尔类型", True),
+                ("列表", ["西安", "北京", "上海"]),
+                ("字典", {"姓名": "小明", "年龄": 20}),
+                ("元组", ("暑期实训",)),
+                ("集合", {1, 2, 2, 3}),
+            ]
+
+            for type_name, value in samples:
+                print(type_name, "：", value, "，类型为：", type(value))
+            """,
+            """
+            data_samples = {
+                "字符串": "Python编程语言",
+                "整数": 2026,
+                "列表": ["西安", "北京", "上海"],
+                "字典": {"姓名": "小明", "年龄": 20},
+                "集合": {1, 2, 3},
+            }
+
+            for label, sample in data_samples.items():
+                print(f"{label} -> {sample} -> {type(sample)}")
+            """,
+            """
+            values = ["Python编程语言", 2026, True, ["西安", "北京"], {"姓名": "小明"}]
+
+            for value in values:
+                print("数据：", value)
+                print("类型：", type(value).__name__)
+            """,
+        ]
+    elif "文件内容如下" in code and "open(" in code:
+        variants = [
+            """
+            file_name = "实训记录.txt"
+
+            with open(file_name, "w", encoding="utf-8") as file:
+                file.write("今天学习了Python文件读写命令。\\n")
+                file.write("with open()可以自动关闭文件。\\n")
+
+            with open(file_name, "r", encoding="utf-8") as file:
+                content = file.read()
+
+            print("文件内容如下：")
+            print(content)
+            """,
+            """
+            target_file = "课堂练习记录.txt"
+            records = [
+                "本次实训完成了文件写入操作。",
+                "读取文件时需要设置合适的编码。",
+            ]
+
+            with open(target_file, "w", encoding="utf-8") as handle:
+                handle.write("\\n".join(records))
+
+            with open(target_file, encoding="utf-8") as handle:
+                print("读取结果：")
+                print(handle.read())
+            """,
+            """
+            note_file = "python实训记录.txt"
+            saved_text = "文件读写练习\\n使用with结构管理文件\\n"
+
+            with open(note_file, "w", encoding="utf-8") as writer:
+                writer.write(saved_text)
+
+            with open(note_file, "r", encoding="utf-8") as reader:
+                for line in reader:
+                    print(line.strip())
+            """,
+        ]
+
+    if not variants:
+        return ""
+    return dedent(variants[(rng.randrange(len(variants)) + index) % len(variants)]).strip()
+
+
+def diversify_code_variables(code: str, rng: random.Random, index: int) -> str:
+    variable_bank = {
+        "username": ["account", "user_name", "login_name"],
+        "class_name": ["class_no", "major_class", "class_id"],
+        "group": ["group_no", "team_no", "group_id"],
+        "name": ["student_name", "user_name", "person_name"],
+        "news": ["news_text", "article", "football_news"],
+        "mystr5": ["raw_text", "message", "source_text"],
+        "mylist2": ["items", "info_list", "parts"],
+        "result": ["joined_text", "output_text", "final_text"],
+        "answer": ["target", "number_answer", "right_number"],
+        "records": ["guess_records", "history", "guess_list"],
+        "chance": ["round_no", "try_count", "step"],
+        "guess": ["guess_num", "input_num", "user_guess"],
+        "price": ["unit_price", "single_price", "goods_price"],
+        "count": ["quantity", "buy_count", "goods_count"],
+        "total": ["amount", "total_price", "money"],
+        "goods_name": ["goods", "product_name", "item_name"],
+        "total_money": ["pay_money", "final_money", "total_price"],
+        "file_name": ["target_file", "record_file", "note_file"],
+        "content": ["file_text", "record_text", "saved_text"],
+        "samples": ["sample_values", "data_samples", "type_samples"],
+        "type_name": ["label", "data_name", "sample_name"],
+        "value": ["sample", "data_value", "item_value"],
+    }
+    result = code
+    for old, variants in variable_bank.items():
+        if not re.search(rf"\b{re.escape(old)}\b", result):
+            continue
+        new_name = variants[(rng.randrange(len(variants)) + index) % len(variants)]
+        result = re.sub(rf"\b{re.escape(old)}\b", new_name, result)
     return result
 
 
@@ -921,7 +1873,16 @@ def extract_tasks(text: str) -> list[TaskItem]:
         line = raw_line.strip()
         if not line:
             continue
-        if re.match(r"^练习[:：]?$", line):
+
+        direct_task = re.match(r"^(?:练习|任务)\s*\d*\s*[：:、.．]\s*(.+)$", line)
+        if direct_task and direct_task.group(1).strip():
+            flush_current()
+            in_exercise = True
+            current_title = infer_task_title(direct_task.group(1))
+            current_lines = [direct_task.group(1)]
+            continue
+
+        if re.match(r"^(?:练习|任务)[:：]?$", line):
             in_exercise = True
             flush_current()
             continue
@@ -1128,6 +2089,191 @@ def generate_code(title: str, requirement: str) -> str:
     ).strip()
 
 
+def build_comparison_rows(report: DayReport, raw_text: str, group: SourceGroup | None = None) -> list[ComparisonRow]:
+    day_label = f"第{report.day_index}天：{report.title}"
+    source_files = "；".join(path.name for path in group.paths) if group else report.source.name
+    original_knowledge = extract_original_knowledge(raw_text)
+    source_header = f"源文件：{source_files}"
+    original_tasks = "\n".join(format_original_task(task) for task in extract_tasks(raw_text))
+    word_topics = "；".join(report.topics)
+    word_details = "\n".join(report.details)
+    generated_tasks = "\n\n".join(f"{task.title}\n{task.requirement}" for task in report.tasks)
+    generated_code = "\n\n".join(f"{task.title}\n{task.code}" for task in report.tasks)
+
+    rows = [
+        ComparisonRow(
+            project=f"{day_label}-课程目标",
+            original_text=f"{source_header}\n\n根据 TXT 中出现的知识点、课堂操作与任务记录反向概括。",
+            generated_text="\n".join(report.goals),
+        ),
+        ComparisonRow(
+            project=f"{day_label}-课程内容",
+            original_text=f"{source_header}\n\n{original_knowledge}",
+            generated_text=word_topics,
+        ),
+        ComparisonRow(
+            project=f"{day_label}-课程内容详情",
+            original_text=original_knowledge,
+            generated_text=word_details,
+        ),
+        ComparisonRow(
+            project=f"{day_label}-任务与练习",
+            original_text=original_tasks if report.tasks else "",
+            generated_text=generated_tasks if report.tasks else "",
+        ),
+        ComparisonRow(
+            project=f"{day_label}-代码",
+            original_text=original_tasks if report.tasks else "",
+            generated_text=generated_code if report.tasks else "",
+        ),
+    ]
+    return rows
+
+
+def extract_original_knowledge(raw_text: str, limit: int = 1200) -> str:
+    lines = []
+    in_task_area = False
+    for line in clean_lines(raw_text):
+        if re.match(r"^(?:练习|任务)\s*\d*\s*[:：]?", line):
+            in_task_area = True
+            continue
+        if in_task_area and re.match(r"^[一二三四五六七八九十]+[、.．]\s*", line):
+            in_task_area = False
+        if in_task_area:
+            continue
+        if is_assignment_line(line):
+            continue
+        if 3 <= len(line) <= 180:
+            lines.append(line)
+    text = "\n".join(unique_keep_order(lines))
+    return text[:limit] + ("……" if len(text) > limit else "")
+
+
+def format_original_task(task: TaskItem) -> str:
+    return f"{task.title}：{task.requirement}".strip("：")
+
+
+def write_comparison_xlsx(path: Path, rows: list[ComparisonRow]) -> None:
+    headers = ["项目", "原txt文档", "生成的word文档"]
+    table = [headers]
+    for row in rows:
+        table.append(
+            [
+                row.project,
+                row.original_text,
+                row.generated_text,
+            ]
+        )
+    if len(table) == 1:
+        table.append(["", "", ""])
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", build_xlsx_content_types())
+        archive.writestr("_rels/.rels", build_xlsx_root_rels())
+        archive.writestr("xl/workbook.xml", build_xlsx_workbook())
+        archive.writestr("xl/_rels/workbook.xml.rels", build_xlsx_workbook_rels())
+        archive.writestr("xl/styles.xml", build_xlsx_styles())
+        archive.writestr("xl/worksheets/sheet1.xml", build_xlsx_sheet(table))
+
+
+def build_xlsx_content_types() -> str:
+    return """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+</Types>"""
+
+
+def build_xlsx_root_rels() -> str:
+    return """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"""
+
+
+def build_xlsx_workbook() -> str:
+    return """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="对照表" sheetId="1" r:id="rId1"/>
+  </sheets>
+</workbook>"""
+
+
+def build_xlsx_workbook_rels() -> str:
+    return """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>"""
+
+
+def build_xlsx_styles() -> str:
+    return """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="2">
+    <font><sz val="11"/><name val="宋体"/></font>
+    <font><b/><sz val="11"/><name val="宋体"/><color rgb="FFFFFFFF"/></font>
+  </fonts>
+  <fills count="3">
+    <fill><patternFill patternType="none"/></fill>
+    <fill><patternFill patternType="gray125"/></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FF2F5597"/><bgColor indexed="64"/></patternFill></fill>
+  </fills>
+  <borders count="2">
+    <border><left/><right/><top/><bottom/><diagonal/></border>
+    <border><left style="thin"/><right style="thin"/><top style="thin"/><bottom style="thin"/><diagonal/></border>
+  </borders>
+  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+  <cellXfs count="3">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>
+    <xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>
+  </cellXfs>
+  <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
+</styleSheet>"""
+
+
+def build_xlsx_sheet(table: list[list[str]]) -> str:
+    widths = [28, 62, 72]
+    cols = "".join(f'<col min="{idx}" max="{idx}" width="{width}" customWidth="1"/>' for idx, width in enumerate(widths, start=1))
+    row_xml: list[str] = []
+    for row_index, row in enumerate(table, start=1):
+        height = 24 if row_index == 1 else 90
+        cells = []
+        for col_index, value in enumerate(row, start=1):
+            ref = f"{excel_col(col_index)}{row_index}"
+            style = 1 if row_index == 1 else 2
+            cells.append(f'<c r="{ref}" t="inlineStr" s="{style}"><is><t>{xml_escape(sanitize_xlsx_text(value))}</t></is></c>')
+        row_xml.append(f'<row r="{row_index}" ht="{height}" customHeight="1">{"".join(cells)}</row>')
+    dimension = f"A1:{excel_col(len(table[0]))}{len(table)}"
+    return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <dimension ref="{dimension}"/>
+  <sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>
+  <cols>{cols}</cols>
+  <sheetData>{''.join(row_xml)}</sheetData>
+  <autoFilter ref="{dimension}"/>
+</worksheet>"""
+
+
+def excel_col(index: int) -> str:
+    result = ""
+    while index:
+        index, remainder = divmod(index - 1, 26)
+        result = chr(65 + remainder) + result
+    return result
+
+
+def sanitize_xlsx_text(value: object) -> str:
+    text = str(value)
+    return re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F]", "", text)
+
+
 def append_day_report(
     doc: Document,
     report: DayReport,
@@ -1148,6 +2294,9 @@ def append_day_report(
         add_body_paragraph(doc, f"（{index}）{detail}")
 
     add_section_heading(doc, "4、课程代码及执行过程：")
+    if not report.tasks:
+        add_body_paragraph(doc, NO_TASK_MESSAGE)
+        return
     for task_index, task in enumerate(report.tasks, start=1):
         add_task_block(doc, report.day_index, task_index, task, screenshots_dir, auto_result_images)
 
@@ -1221,7 +2370,7 @@ def execute_python_code_safely(code: str, day_index: int, task_index: int) -> tu
     if not is_safe_code_for_execution(code):
         return None
 
-    input_values = build_input_values(code)
+    input_values = build_input_values(code, seed=day_index * 100 + task_index)
     wrapped_code = build_execution_wrapper(code, input_values, seed=day_index * 100 + task_index)
     try:
         with tempfile.TemporaryDirectory(prefix="report_code_run_") as temp_dir:
@@ -1272,36 +2421,51 @@ def build_execution_wrapper(code: str, input_values: list[str], seed: int) -> st
     )
 
 
-def build_input_values(code: str) -> list[str]:
+def build_input_values(code: str, seed: int = 0) -> list[str]:
     prompts = re.findall(r"input\(\s*(?:f)?[\"']([^\"']*)[\"']?", code)
+    if "班级" in code and "组别" in code and "姓名" in code and len(prompts) < 3:
+        prompts = ["请输入班级：", "请输入组别：", "请输入姓名："]
     if not prompts and "input(" in code:
         prompts = ["请输入内容"]
 
+    rng = random.Random(f"input-values-{seed}-{hashlib.md5(code.encode('utf-8')).hexdigest()[:10]}")
     values: list[str] = []
-    number_inputs = ["50", "75", "88", "94", "97", "98", "100"]
+    number_inputs = [str(value) for value in rng.sample(range(12, 96), 7)]
     for index, prompt in enumerate(prompts):
         if "用户名" in prompt:
-            values.append("sky_2026")
+            values.append(make_sample_username(rng))
         elif "班级" in prompt:
-            values.append("23060101")
+            values.append(rng.choice(SAMPLE_CLASSES))
         elif "组别" in prompt or "组号" in prompt:
-            values.append("2")
+            values.append(rng.choice(SAMPLE_GROUPS))
         elif "姓名" in prompt:
-            values.append("StudentA")
-        elif "商品" in prompt:
-            values.append("笔记本")
+            if "用户名" in prompt:
+                values.append(make_sample_username(rng))
+            else:
+                values.append(rng.choice(SAMPLE_NAMES if rng.random() < 0.55 else SAMPLE_CHINESE_NAMES))
         elif "单价" in prompt or "价格" in prompt:
-            values.append("12.5")
+            values.append(f"{rng.choice([8.5, 12.0, 15.8, 19.9, 26.5]):.1f}")
         elif "数量" in prompt:
-            values.append("4")
+            values.append(str(rng.randint(2, 6)))
+        elif "商品" in prompt:
+            values.append(rng.choice(SAMPLE_PRODUCTS))
         elif "数字" in prompt or "猜" in prompt:
             values.append(number_inputs[min(index, len(number_inputs) - 1)])
         else:
-            values.append(str(index + 3))
+            values.append(rng.choice(SAMPLE_PROJECTS + SAMPLE_TEXT_LINES + SAMPLE_NAMES))
 
     if "猜数字" in code and len(values) < 7:
         values.extend(number_inputs[len(values) :])
     return values
+
+
+def make_sample_username(rng: random.Random) -> str:
+    prefix = rng.choice(["lin", "chen", "zhao", "xu", "luo", "tang", "qin", "sun"])
+    suffix = str(rng.randint(10, 99))
+    candidate = f"{prefix}_{suffix}"
+    if len(candidate) > 8:
+        candidate = candidate[:8]
+    return candidate.ljust(8, "7")
 
 
 def is_safe_code_for_execution(code: str) -> bool:
@@ -1368,8 +2532,10 @@ def is_safe_open_call(node: ast.Call) -> bool:
 
 def simulate_code_output(task: TaskItem) -> str:
     code = task.code
+    rng = random.Random(f"simulate-{hashlib.md5(code.encode('utf-8')).hexdigest()[:12]}")
     if "请输入用户名" in code and "upper()" in code:
-        return "请输入用户名（包含数字、字母、下划线，长度为8）：sky_2026\n用户名： SKY_2026"
+        username = make_sample_username(rng)
+        return f"请输入用户名（包含数字、字母、下划线，长度为8）：{username}\n用户名： {username.upper()}"
     if "原始新闻" in code and "足球" in code:
         return "\n".join(
             [
@@ -1405,7 +2571,10 @@ def simulate_code_output(task: TaskItem) -> str:
     if "continue" in code and "break" in code:
         return "1 3 5 7 9 11 13 15 "
     if "calc_total" in code:
-        return "请输入商品名称：笔记本\n请输入商品单价：12.5\n请输入购买数量：4\n笔记本的总价为：50.00元"
+        product = rng.choice(SAMPLE_PRODUCTS)
+        price = rng.choice([8.5, 12.0, 15.8, 19.9, 26.5])
+        count = rng.randint(2, 6)
+        return f"请输入商品名称：{product}\n请输入商品单价：{price:.1f}\n请输入购买数量：{count}\n{product}的总价为：{price * count:.2f}元"
     if "文件内容如下" in code:
         return "文件内容如下：\n今天练习了Python文件读写命令。\nwith open()结构可以帮助程序自动关闭文件。"
     if "类型为" in code:
@@ -1421,7 +2590,10 @@ def simulate_code_output(task: TaskItem) -> str:
             ]
         )
     if "请输入班级" in code and "请输入组别" in code and "请输入姓名" in code:
-        return "请输入班级：23060101\n请输入组别：2\n请输入姓名：StudentA\n我是23060101班的学生，我是第2组，我的姓名是：StudentA"
+        class_name = rng.choice(SAMPLE_CLASSES)
+        group = rng.choice(SAMPLE_GROUPS)
+        name = rng.choice(SAMPLE_NAMES if rng.random() < 0.55 else SAMPLE_CHINESE_NAMES)
+        return f"请输入班级：{class_name}\n请输入组别：{group}\n请输入姓名：{name}\n我是{class_name}班的学生，我是第{group}组，我的姓名是：{name}"
 
     printed = extract_simple_print_output(code)
     if printed:
@@ -1455,47 +2627,51 @@ def render_pycharm_console_image(
     draw_module,
     font_module,
 ) -> None:
-    font = load_result_font(font_module, 22)
-    title_font = load_result_font(font_module, 20)
-    small_font = load_result_font(font_module, 16)
-    wrapped_lines = wrap_console_lines(lines, 82)
-    line_height = 30
-    width = 960
-    height = max(290, 128 + len(wrapped_lines) * line_height + 34)
+    width = 754
+    height = 351
+    font = load_result_font(font_module, 16)
+    title_font = load_result_font(font_module, 16)
+    icon_font = load_result_font(font_module, 18)
+    small_font = load_result_font(font_module, 14)
+    wrapped_lines = wrap_console_lines(lines, 78)
+    line_height = 28
+    max_lines = 8
+    if len(wrapped_lines) > max_lines:
+        wrapped_lines = wrapped_lines[: max_lines - 1] + ["……输出较多，后续内容已省略。"]
 
     image = image_module.new("RGB", (width, height), "#17191d")
     draw = draw_module.Draw(image)
 
-    draw.rectangle((0, 0, width, 72), fill="#1f2227")
-    draw.text((22, 24), "运行", fill="#f3f6fb", font=title_font)
-    draw.rounded_rectangle((92, 14, 232, 58), radius=8, fill="#243452", outline="#3b63a5", width=2)
-    draw.ellipse((112, 25, 132, 45), fill="#5da8ff")
-    draw.text((146, 24), "lianxi", fill="#dfe8f7", font=title_font)
-    draw.text((211, 24), "×", fill="#8d96a6", font=title_font)
+    draw.rectangle((0, 0, width, 52), fill="#1f2227")
+    draw.text((8, 18), "运行", fill="#f3f6fb", font=title_font)
+    draw.rounded_rectangle((68, 10, 176, 43), radius=7, fill="#243452", outline="#3b63a5", width=1)
+    draw.rounded_rectangle((82, 17, 105, 36), radius=5, fill="#3777c8")
+    draw.text((119, 17), "lianxi", fill="#dfe8f7", font=title_font)
+    draw.text((157, 16), "×", fill="#8d96a6", font=small_font)
 
-    draw.rectangle((0, 72, width, 126), fill="#181b20")
-    draw.line((0, 72, width, 72), fill="#2a2e36", width=1)
-    draw.line((0, 126, width, 126), fill="#2a2e36", width=1)
-    draw.rectangle((0, 126, 66, height), fill="#181b20")
-    draw.line((66, 126, 66, height), fill="#2b3038", width=1)
-    draw.text((24, 90), "▷", fill="#5fb66d", font=title_font)
-    draw.text((74, 90), "■", fill="#8b929f", font=small_font)
-    draw.text((120, 87), "⋮", fill="#adb4c0", font=title_font)
+    draw.rectangle((0, 52, width, 97), fill="#181b20")
+    draw.line((0, 52, width, 52), fill="#2a2e36", width=1)
+    draw.line((0, 97, width, 97), fill="#2a2e36", width=1)
+    draw.rectangle((0, 97, 44, height), fill="#181b20")
+    draw.line((44, 97, 44, height), fill="#2b3038", width=1)
+    draw.text((14, 66), "▷", fill="#5fb66d", font=icon_font)
+    draw.text((48, 67), "■", fill="#8b929f", font=small_font)
+    draw.text((88, 64), "⋮", fill="#adb4c0", font=icon_font)
     for offset, icon in enumerate(["↑", "↓", "≡", "⇩", "▣", "⌫"]):
-        draw.text((24, 150 + offset * 42), icon, fill="#777e8a", font=title_font)
+        draw.text((14, 112 + offset * 32), icon, fill="#777e8a", font=icon_font)
 
-    y = 142
+    y = 104
     for line in wrapped_lines:
         color = "#bfc7d5"
         if "Traceback" in line or exit_code != 0 and line == wrapped_lines[-1]:
             color = "#ff7b72"
         if line.startswith("请输入") and "：" in line:
             prefix, value = line.rsplit("：", 1)
-            draw.text((88, y), prefix + "：", fill="#bfc7d5", font=font)
+            draw.text((61, y), prefix + "：", fill="#bfc7d5", font=font)
             prefix_width = draw.textlength(prefix + "：", font=font)
-            draw.text((88 + prefix_width, y), value, fill="#65b96d", font=font)
+            draw.text((61 + prefix_width, y), value, fill="#65b96d", font=font)
         else:
-            draw.text((88, y), line, fill=color, font=font)
+            draw.text((61, y), line, fill=color, font=font)
         y += line_height
 
     target.parent.mkdir(parents=True, exist_ok=True)

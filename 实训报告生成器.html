@@ -7,18 +7,20 @@
   <style>
     :root {
       color-scheme: light;
-      --bg: #f4f6f8;
-      --panel: #ffffff;
-      --panel-2: #f9fbfc;
-      --text: #16202a;
-      --muted: #667481;
-      --line: #d9e0e6;
-      --accent: #16746f;
-      --accent-2: #0f5f8c;
+      --bg: #eef4ff;
+      --panel: rgba(255, 255, 255, 0.72);
+      --panel-2: rgba(255, 255, 255, 0.48);
+      --surface: rgba(255, 255, 255, 0.62);
+      --surface-strong: rgba(255, 255, 255, 0.82);
+      --text: #142033;
+      --muted: #647184;
+      --line: rgba(142, 158, 184, 0.28);
+      --accent: #0a84ff;
+      --accent-2: #30c7b5;
       --warn: #a96511;
       --danger: #a93434;
-      --shadow: 0 18px 42px rgba(20, 31, 43, 0.12);
-      --radius: 8px;
+      --shadow: 0 22px 70px rgba(49, 70, 106, 0.18);
+      --radius: 22px;
     }
 
     * {
@@ -28,14 +30,18 @@
     body {
       margin: 0;
       min-height: 100vh;
-      background: var(--bg);
+      background:
+        radial-gradient(circle at 12% 10%, rgba(10, 132, 255, 0.20), transparent 32%),
+        radial-gradient(circle at 88% 16%, rgba(48, 199, 181, 0.22), transparent 34%),
+        linear-gradient(145deg, #f7fbff 0%, #edf4ff 48%, #f6f8ff 100%);
       color: var(--text);
       font-family: "Microsoft YaHei", "Segoe UI", Arial, sans-serif;
       letter-spacing: 0;
     }
 
     button,
-    input {
+    input,
+    select {
       font: inherit;
     }
 
@@ -51,7 +57,9 @@
       align-items: center;
       justify-content: space-between;
       padding: 0 24px;
-      background: #ffffff;
+      background: rgba(255, 255, 255, 0.62);
+      backdrop-filter: blur(22px) saturate(155%);
+      -webkit-backdrop-filter: blur(22px) saturate(155%);
       border-bottom: 1px solid var(--line);
     }
 
@@ -67,11 +75,12 @@
     .brand-mark {
       width: 28px;
       height: 28px;
-      border-radius: 6px;
+      border-radius: 9px;
       display: grid;
       place-items: center;
       color: white;
-      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      background: linear-gradient(135deg, #0a84ff, #30c7b5);
+      box-shadow: 0 10px 22px rgba(10, 132, 255, 0.25);
       font-weight: 800;
       flex: 0 0 auto;
     }
@@ -96,8 +105,16 @@
       border: 1px solid var(--line);
       border-radius: var(--radius);
       box-shadow: var(--shadow);
+      backdrop-filter: blur(26px) saturate(150%);
+      -webkit-backdrop-filter: blur(26px) saturate(150%);
       min-width: 0;
       overflow: hidden;
+    }
+
+    .input-panel {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      max-height: calc(100vh - 94px);
     }
 
     .panel-header {
@@ -121,21 +138,45 @@
       padding: 16px;
     }
 
+    .input-panel .panel-body {
+      min-height: 0;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      scrollbar-gutter: stable;
+    }
+
+    .input-panel .panel-body::-webkit-scrollbar,
+    .file-list::-webkit-scrollbar,
+    .log::-webkit-scrollbar {
+      width: 10px;
+    }
+
+    .input-panel .panel-body::-webkit-scrollbar-thumb,
+    .file-list::-webkit-scrollbar-thumb,
+    .log::-webkit-scrollbar-thumb {
+      border: 3px solid transparent;
+      border-radius: 999px;
+      background: rgba(100, 113, 132, 0.42);
+      background-clip: padding-box;
+    }
+
     .dropzone {
       min-height: 190px;
       display: grid;
       place-items: center;
       padding: 20px;
       border: 2px dashed #aab7c2;
-      border-radius: var(--radius);
-      background: #fbfcfd;
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.48);
       cursor: pointer;
-      transition: border-color .18s ease, background .18s ease, transform .18s ease;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.78);
+      transition: border-color .18s ease, background .18s ease, transform .18s ease, box-shadow .18s ease;
     }
 
     .dropzone.dragging {
       border-color: var(--accent);
-      background: #edf8f6;
+      background: rgba(226, 243, 255, 0.78);
+      box-shadow: 0 18px 38px rgba(10, 132, 255, 0.16);
       transform: translateY(-1px);
     }
 
@@ -149,10 +190,10 @@
     .drop-icon {
       width: 48px;
       height: 48px;
-      border-radius: 8px;
+      border-radius: 15px;
       display: grid;
       place-items: center;
-      background: #e5f2f0;
+      background: linear-gradient(135deg, rgba(10, 132, 255, 0.14), rgba(48, 199, 181, 0.16));
       color: var(--accent);
       font-size: 28px;
       font-weight: 800;
@@ -178,7 +219,7 @@
       display: grid;
       gap: 8px;
       margin-top: 14px;
-      max-height: 210px;
+      max-height: clamp(150px, 24vh, 260px);
       overflow: auto;
       padding-right: 2px;
     }
@@ -191,8 +232,9 @@
       min-height: 42px;
       padding: 7px 8px;
       border: 1px solid var(--line);
-      border-radius: 7px;
-      background: #ffffff;
+      border-radius: 14px;
+      background: var(--surface-strong);
+      box-shadow: 0 10px 24px rgba(49, 70, 106, 0.08);
     }
 
     .file-index {
@@ -200,8 +242,8 @@
       height: 28px;
       display: grid;
       place-items: center;
-      border-radius: 6px;
-      background: #eef2f5;
+      border-radius: 10px;
+      background: rgba(10, 132, 255, 0.10);
       color: #35414d;
       font-size: 12px;
       font-weight: 700;
@@ -221,7 +263,7 @@
       display: grid;
       place-items: center;
       border: 1px solid transparent;
-      border-radius: 6px;
+      border-radius: 10px;
       color: var(--muted);
       background: transparent;
       cursor: pointer;
@@ -229,7 +271,7 @@
 
     .icon-button:hover {
       color: var(--danger);
-      background: #fff1f1;
+      background: rgba(255, 241, 241, 0.9);
       border-color: #f0c8c8;
     }
 
@@ -262,20 +304,39 @@
     }
 
     input[type="text"],
-    input[type="number"] {
+    input[type="number"],
+    input[type="password"],
+    textarea,
+    select {
       width: 100%;
-      height: 38px;
       border: 1px solid var(--line);
-      border-radius: 7px;
-      padding: 0 10px;
+      border-radius: 13px;
       color: var(--text);
-      background: #ffffff;
+      background: rgba(255, 255, 255, 0.72);
       outline: none;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.85);
     }
 
-    input:focus {
+    input[type="text"],
+    input[type="number"],
+    input[type="password"],
+    select {
+      height: 38px;
+      padding: 0 10px;
+    }
+
+    textarea {
+      min-height: 76px;
+      resize: vertical;
+      padding: 10px;
+      line-height: 1.55;
+    }
+
+    input:focus,
+    textarea:focus,
+    select:focus {
       border-color: var(--accent);
-      box-shadow: 0 0 0 3px rgba(22, 116, 111, 0.14);
+      box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.15);
     }
 
     .option-row {
@@ -285,6 +346,12 @@
       flex-wrap: wrap;
       color: #33414f;
       font-size: 13px;
+    }
+
+    .option-row select {
+      width: min(210px, 100%);
+      height: 40px;
+      flex: 0 1 210px;
     }
 
     .check {
@@ -299,13 +366,59 @@
       display: none;
       gap: 10px;
       padding: 12px;
-      border: 1px solid #cfe0df;
-      border-radius: var(--radius);
-      background: #f5fbfa;
+      border: 1px solid rgba(10, 132, 255, 0.18);
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.44);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
     }
 
     .ai-box.show {
       display: grid;
+    }
+
+    .env-note,
+    .ai-answer,
+    .ai-error {
+      padding: 10px 12px;
+      border-radius: 14px;
+      line-height: 1.55;
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }
+
+    .env-note {
+      color: #405064;
+      background: rgba(255, 255, 255, 0.55);
+      border: 1px solid var(--line);
+    }
+
+    .ai-answer {
+      display: none;
+      color: #172234;
+      background: rgba(232, 246, 255, 0.72);
+      border: 1px solid rgba(10, 132, 255, 0.18);
+      white-space: pre-wrap;
+    }
+
+    .ai-answer.show {
+      display: block;
+    }
+
+    .ai-error {
+      display: none;
+      color: #8e2626;
+      background: rgba(255, 236, 236, 0.76);
+      border: 1px solid rgba(169, 52, 52, 0.18);
+      white-space: pre-wrap;
+    }
+
+    .ai-error.show {
+      display: block;
+    }
+
+    .inline-state {
+      color: var(--muted);
+      font-size: 13px;
     }
 
     .actions {
@@ -320,7 +433,7 @@
     .download {
       min-height: 40px;
       border: 1px solid transparent;
-      border-radius: 7px;
+      border-radius: 14px;
       padding: 0 14px;
       display: inline-flex;
       align-items: center;
@@ -330,15 +443,18 @@
       font-weight: 700;
       text-decoration: none;
       white-space: nowrap;
+      transition: transform .18s ease, filter .18s ease, background .18s ease, box-shadow .18s ease;
     }
 
     .primary {
       color: #ffffff;
-      background: var(--accent);
+      background: linear-gradient(135deg, #0a84ff, #30c7b5);
+      box-shadow: 0 14px 28px rgba(10, 132, 255, 0.24);
     }
 
     .primary:hover {
-      background: #126660;
+      filter: brightness(0.98);
+      transform: translateY(-1px);
     }
 
     .primary:disabled {
@@ -348,12 +464,12 @@
 
     .secondary {
       color: #31404e;
-      background: #ffffff;
+      background: rgba(255, 255, 255, 0.66);
       border-color: var(--line);
     }
 
     .secondary:hover {
-      background: #f4f7f9;
+      background: rgba(255, 255, 255, 0.90);
     }
 
     .output-panel {
@@ -377,17 +493,18 @@
       min-height: 74px;
       padding: 14px;
       border: 1px solid var(--line);
-      border-radius: var(--radius);
-      background: #ffffff;
+      border-radius: 18px;
+      background: var(--surface);
+      box-shadow: 0 12px 32px rgba(49, 70, 106, 0.10);
     }
 
     .status-symbol {
       width: 42px;
       height: 42px;
-      border-radius: 8px;
+      border-radius: 14px;
       display: grid;
       place-items: center;
-      background: #eef2f5;
+      background: rgba(255, 255, 255, 0.72);
       color: #52616f;
       font-size: 24px;
       font-weight: 800;
@@ -424,17 +541,25 @@
 
     .download-box {
       display: none;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 10px;
       padding: 14px;
-      border: 1px solid #cde4dd;
-      border-radius: var(--radius);
-      background: #f0f8f5;
+      border: 1px solid rgba(48, 199, 181, 0.26);
+      border-radius: 18px;
+      background: rgba(235, 251, 247, 0.72);
+      box-shadow: 0 14px 34px rgba(48, 199, 181, 0.12);
     }
 
     .download-box.show {
       display: flex;
+    }
+
+    .download-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
     }
 
     .download-name {
@@ -447,11 +572,11 @@
 
     .download {
       color: #ffffff;
-      background: var(--accent-2);
+      background: linear-gradient(135deg, #0a84ff, #1fb69e);
     }
 
     .download:hover {
-      background: #0c547c;
+      filter: brightness(0.96);
     }
 
     .log {
@@ -461,8 +586,8 @@
       margin: 0;
       padding: 14px;
       border: 1px solid #202a33;
-      border-radius: var(--radius);
-      background: #121820;
+      border-radius: 18px;
+      background: rgba(17, 25, 36, 0.94);
       color: #d8e0e7;
       font-family: Consolas, "Times New Roman", monospace;
       font-size: 13px;
@@ -529,7 +654,7 @@
     </header>
 
     <section class="workspace">
-      <section class="panel">
+      <section class="panel input-panel">
         <div class="panel-header">
           <h1 class="panel-title">TXT 输入窗口</h1>
           <button class="muted-button" id="clearFiles" type="button">清空</button>
@@ -584,6 +709,10 @@
                 <label for="templatePath">模板路径</label>
                 <input id="templatePath" type="text" placeholder="留空使用默认模板">
               </div>
+              <div class="field full">
+                <label for="personalNote">个性化内容/生成偏好</label>
+                <textarea id="personalNote" placeholder="例如：写得更像课堂记录、突出自己调试过程、少用固定开头、内容更自然一点。留空也会自动差异化。"></textarea>
+              </div>
             </div>
 
             <div class="option-row">
@@ -593,27 +722,58 @@
             </div>
 
             <div class="ai-box" id="aiBox">
+              <div class="env-note">
+                API 可以直接在这里填写，API Key 会隐藏显示，并自动同步到项目 .env；下次启动会读取保存配置。点“清除 Key”会同时清空网页输入和 .env 里的 AI_API_KEY。
+              </div>
               <div class="option-row">
-                <button class="secondary" id="deepseekPresetBtn" type="button">填入 DeepSeek 预设</button>
+                <select id="aiProviderPreset" aria-label="AI 通道预设">
+                  <option value="deepseek">DeepSeek</option>
+                  <option value="openrouter">OpenRouter</option>
+                  <option value="kimi">Kimi</option>
+                  <option value="qwen">通义千问</option>
+                  <option value="zhipu">智谱清言</option>
+                  <option value="siliconflow">硅基流动</option>
+                </select>
+                <button class="secondary" id="deepseekPresetBtn" type="button">套用接口预设</button>
+                <button class="secondary" id="detectProxyBtn" type="button">检测代理</button>
+                <button class="secondary" id="probeRoutesBtn" type="button">检测全部通道</button>
+                <button class="secondary" id="saveAiConfigBtn" type="button">保存 AI 配置</button>
+                <button class="secondary" id="clearAiKeyBtn" type="button">清除 Key</button>
+                <button class="secondary" id="testAiBtn" type="button">测试 AI 连接</button>
+                <span class="inline-state" id="aiSavedState">未读取保存状态</span>
               </div>
               <div class="field-grid">
                 <div class="field full">
                   <label for="aiBaseUrl">AI API 地址</label>
-                  <input id="aiBaseUrl" type="text" placeholder="DeepSeek：https://api.deepseek.com">
+                  <input id="aiBaseUrl" type="text" placeholder="例如：https://api.deepseek.com">
                 </div>
                 <div class="field">
-                  <label for="aiModel">模型名</label>
-                  <input id="aiModel" type="text" placeholder="例如：deepseek-v4-flash">
+                  <label for="aiModel">模型名称</label>
+                  <input id="aiModel" type="text" placeholder="例如：deepseek-chat">
                 </div>
                 <div class="field">
                   <label for="aiTemperature">温度</label>
-                  <input id="aiTemperature" type="number" min="0" max="1.5" step="0.1" value="0.2">
+                  <input id="aiTemperature" type="number" min="0" max="1.5" step="0.1" value="0.6">
                 </div>
                 <div class="field full">
-                  <label for="aiApiKey">API Key</label>
-                  <input id="aiApiKey" type="password" placeholder="按平台要求填写；无鉴权接口可留空">
+                  <label for="aiApiKey">API Key（隐藏输入）</label>
+                  <input id="aiApiKey" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴 API Key，输入内容会自动隐藏">
+                </div>
+                <div class="field full">
+                  <label for="aiProxyUrl">代理地址（可选）</label>
+                  <input id="aiProxyUrl" type="text" placeholder="例如：http://127.0.0.1:7890；留空会自动检测系统/本地代理">
+                </div>
+                <div class="field full">
+                  <label for="aiChatInput">AI 输入框</label>
+                  <textarea id="aiChatInput" placeholder="输入一句话测试真实 API，例如：请把“数据类型书写与元素访问”换一种实训报告写法。"></textarea>
                 </div>
               </div>
+              <div class="option-row">
+                <button class="secondary" id="sendAiBtn" type="button">发送到 AI</button>
+                <span class="inline-state" id="aiChatState">等待发送</span>
+              </div>
+              <div class="ai-answer" id="aiAnswer"></div>
+              <div class="ai-error" id="aiError"></div>
             </div>
           </div>
 
@@ -634,13 +794,19 @@
             <div class="status-symbol" id="statusSymbol">·</div>
             <div>
               <div class="status-title" id="statusTitle">等待 TXT 文件</div>
-              <div class="status-copy" id="statusCopy">把 TXT 拖到左侧后点击生成，Word 会在这里出现下载按钮。</div>
+              <div class="status-copy" id="statusCopy">把 TXT 拖到左侧后点击生成，Word 和对照表会在这里出现下载按钮。</div>
             </div>
           </div>
 
           <div class="download-box" id="downloadBox">
-            <div class="download-name" id="downloadName"></div>
-            <a class="download" id="downloadLink" href="#" download><span>↓</span><span>下载 Word</span></a>
+            <div class="download-row">
+              <div class="download-name" id="downloadName"></div>
+              <a class="download" id="downloadLink" href="#" download><span>↓</span><span>下载 Word</span></a>
+            </div>
+            <div class="download-row" id="xlsxDownloadRow">
+              <div class="download-name" id="xlsxDownloadName"></div>
+              <a class="download" id="xlsxDownloadLink" href="#" download><span>↓</span><span>下载对照表</span></a>
+            </div>
           </div>
 
           <pre class="log" id="log"></pre>
@@ -659,6 +825,18 @@
     const sampleBtn = document.getElementById("sampleBtn");
     const clearLogBtn = document.getElementById("clearLog");
     const deepseekPresetBtn = document.getElementById("deepseekPresetBtn");
+    const detectProxyBtn = document.getElementById("detectProxyBtn");
+    const probeRoutesBtn = document.getElementById("probeRoutesBtn");
+    const saveAiConfigBtn = document.getElementById("saveAiConfigBtn");
+    const clearAiKeyBtn = document.getElementById("clearAiKeyBtn");
+    const aiProviderPreset = document.getElementById("aiProviderPreset");
+    const testAiBtn = document.getElementById("testAiBtn");
+    const sendAiBtn = document.getElementById("sendAiBtn");
+    const aiChatInput = document.getElementById("aiChatInput");
+    const aiChatState = document.getElementById("aiChatState");
+    const aiSavedState = document.getElementById("aiSavedState");
+    const aiAnswer = document.getElementById("aiAnswer");
+    const aiError = document.getElementById("aiError");
     const logBox = document.getElementById("log");
     const statusSymbol = document.getElementById("statusSymbol");
     const statusTitle = document.getElementById("statusTitle");
@@ -667,8 +845,51 @@
     const downloadBox = document.getElementById("downloadBox");
     const downloadName = document.getElementById("downloadName");
     const downloadLink = document.getElementById("downloadLink");
+    const xlsxDownloadRow = document.getElementById("xlsxDownloadRow");
+    const xlsxDownloadName = document.getElementById("xlsxDownloadName");
+    const xlsxDownloadLink = document.getElementById("xlsxDownloadLink");
 
     let selectedFiles = [];
+    let hasSavedAiKey = false;
+    let aiAutoSaveTimer = null;
+    const aiPresets = {
+      deepseek: {
+        name: "DeepSeek",
+        baseUrl: "https://api.deepseek.com",
+        model: "deepseek-chat",
+        temperature: "0.6"
+      },
+      openrouter: {
+        name: "OpenRouter",
+        baseUrl: "https://openrouter.ai/api/v1",
+        model: "openai/gpt-4o-mini",
+        temperature: "0.4"
+      },
+      kimi: {
+        name: "Kimi",
+        baseUrl: "https://api.moonshot.cn/v1",
+        model: "moonshot-v1-8k",
+        temperature: "0.3"
+      },
+      qwen: {
+        name: "通义千问",
+        baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        model: "qwen-plus",
+        temperature: "0.4"
+      },
+      zhipu: {
+        name: "智谱清言",
+        baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+        model: "glm-4-flash",
+        temperature: "0.4"
+      },
+      siliconflow: {
+        name: "硅基流动",
+        baseUrl: "https://api.siliconflow.cn/v1",
+        model: "Qwen/Qwen2.5-7B-Instruct",
+        temperature: "0.4"
+      }
+    };
 
     function log(message) {
       const time = new Date().toLocaleTimeString();
@@ -743,6 +964,245 @@
       return document.getElementById(id).checked;
     }
 
+    function aiConfigPayload() {
+      return {
+        provider: aiProviderPreset.value,
+        baseUrl: formValue("aiBaseUrl"),
+        apiKey: formValue("aiApiKey"),
+        model: formValue("aiModel"),
+        temperature: formValue("aiTemperature") || "0.6",
+        proxyUrl: formValue("aiProxyUrl")
+      };
+    }
+
+    function showAiError(message) {
+      aiError.textContent = message;
+      aiError.classList.add("show");
+      aiAnswer.classList.remove("show");
+      log(`AI 配置提示：${message}`);
+    }
+
+    function clearAiError() {
+      aiError.classList.remove("show");
+    }
+
+    function validateAiConfig(options = {}) {
+      const { requireApiKey = false } = options;
+      const config = aiConfigPayload();
+      const errors = [];
+      if (config.baseUrl) {
+        try {
+          const url = new URL(config.baseUrl);
+          if (!["http:", "https:"].includes(url.protocol) || !url.host) {
+            errors.push("AI API 地址格式不正确，应类似：https://api.deepseek.com");
+          }
+        } catch {
+          errors.push("AI API 地址格式不正确，应类似：https://api.deepseek.com");
+        }
+      }
+      if (config.proxyUrl) {
+        try {
+          const proxy = new URL(config.proxyUrl);
+          if (!["http:", "https:"].includes(proxy.protocol) || !proxy.host) {
+            errors.push("代理地址格式不正确，应类似：http://127.0.0.1:7890。当前工具使用 Python 标准库，只支持 HTTP/HTTPS 代理。");
+          }
+        } catch {
+          errors.push("代理地址格式不正确，应类似：http://127.0.0.1:7890");
+        }
+      }
+      if (config.model && config.model.length < 2) {
+        errors.push("模型名称太短，请填写接口文档里的真实模型名。");
+      }
+      const temperature = Number(config.temperature || "0.6");
+      if (!Number.isFinite(temperature) || temperature < 0 || temperature > 2) {
+        errors.push("温度建议填写 0 到 2 之间的数字。");
+      }
+      if (requireApiKey && !config.apiKey && !hasSavedAiKey) {
+        errors.push("请填写 API Key，或先保存一份可用的 .env 密钥。");
+      }
+      if (config.apiKey) {
+        const lowerKey = config.apiKey.toLowerCase();
+        if (/\s/.test(config.apiKey)) {
+          errors.push("API Key 里不能包含空格、换行或制表符。");
+        }
+        if (lowerKey.startsWith("http://") || lowerKey.startsWith("https://")) {
+          errors.push("API Key 输入框里不能填写网址，网址请填到 AI API 地址。");
+        }
+        if (lowerKey.includes("bearer ")) {
+          errors.push("API Key 不要带 Bearer 前缀，只粘贴密钥本身。");
+        }
+        if (config.apiKey.length < 12) {
+          errors.push("API Key 看起来太短，请检查是否复制完整。");
+        }
+        if (["你的", "api密钥", "apikey", "api_key", "your-key", "your_api_key"].some(token => lowerKey.includes(token))) {
+          errors.push("API Key 还是示例占位内容，请换成真实密钥。");
+        }
+        const providerHint = {
+          deepseek: "DeepSeek 常见 Key 多以 sk- 开头。",
+          openrouter: "OpenRouter 常见 Key 多以 sk-or- 或 sk- 开头。",
+          kimi: "Kimi 常见 Key 多以 sk- 开头。",
+          qwen: "通义千问兼容模式常见 Key 多以 sk- 开头。",
+          siliconflow: "硅基流动常见 Key 多以 sk- 开头。"
+        }[config.provider];
+        if (providerHint && !config.apiKey.startsWith("sk-")) {
+          log(`AI Key 格式提醒：${providerHint} 如果你确认平台给的 Key 就是这个格式，可以继续点“测试 AI 连接”做真实验证。`);
+        }
+      }
+      if (errors.length) {
+        showAiError(errors.join("；"));
+        return false;
+      }
+      clearAiError();
+      return true;
+    }
+
+    async function refreshAiEnvStatus() {
+      try {
+        const response = await fetch(`${apiBase}/ai-env-status`, { cache: "no-store" });
+        const result = await response.json();
+        if (!result.ok) {
+          throw new Error(result.error || "读取失败");
+        }
+        hasSavedAiKey = !!result.hasKey;
+        aiSavedState.textContent = result.hasKey ? `已保存 Key：${result.maskedKey}` : "未保存 Key";
+        if (result.baseUrl && !formValue("aiBaseUrl")) document.getElementById("aiBaseUrl").value = result.baseUrl;
+        if (result.model && !formValue("aiModel")) document.getElementById("aiModel").value = result.model;
+        if (result.temperature && !formValue("aiTemperature")) document.getElementById("aiTemperature").value = result.temperature;
+        if (result.proxyUrl && !formValue("aiProxyUrl")) document.getElementById("aiProxyUrl").value = result.proxyUrl;
+        if (result.provider && aiPresets[result.provider]) aiProviderPreset.value = result.provider;
+      } catch {
+        aiSavedState.textContent = "保存状态读取失败";
+      }
+    }
+
+    async function saveAiConfig(silent = false) {
+      if (!validateAiConfig({ requireApiKey: !hasSavedAiKey })) {
+        return false;
+      }
+      saveAiConfigBtn.disabled = true;
+      try {
+        const response = await fetch(`${apiBase}/save-ai-config`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(aiConfigPayload())
+        });
+        const result = await response.json();
+        if (!result.ok) {
+          throw new Error(result.error || "保存失败");
+        }
+        hasSavedAiKey = !!result.savedKey || hasSavedAiKey;
+        aiSavedState.textContent = result.savedKey ? `已保存 Key：${result.savedKey}` : "AI 配置已保存";
+        if (!silent) {
+          aiAnswer.textContent = `${result.message || "AI 配置已保存。"}\n保存位置：${result.envPath || ".env"}`;
+          aiAnswer.classList.add("show");
+          log("AI 配置已写入 .env。");
+        }
+        clearAiError();
+        return true;
+      } catch (error) {
+        showAiError(error.message);
+        return false;
+      } finally {
+        saveAiConfigBtn.disabled = false;
+      }
+    }
+
+    async function clearAiKey() {
+      clearAiKeyBtn.disabled = true;
+      try {
+        const response = await fetch(`${apiBase}/clear-ai-key`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({})
+        });
+        const result = await response.json();
+        if (!result.ok) {
+          throw new Error(result.error || "清除失败");
+        }
+        document.getElementById("aiApiKey").value = "";
+        hasSavedAiKey = false;
+        aiSavedState.textContent = "未保存 Key";
+        aiAnswer.textContent = result.message || "已清除 API Key。";
+        aiAnswer.classList.add("show");
+        clearAiError();
+        log("已清除页面 API Key，并清空 .env 中的 AI_API_KEY。");
+      } catch (error) {
+        showAiError(error.message);
+      } finally {
+        clearAiKeyBtn.disabled = false;
+      }
+    }
+
+    async function detectAiProxy() {
+      detectProxyBtn.disabled = true;
+      log("正在检测系统代理和常见本地代理端口……");
+      try {
+        const response = await fetch(`${apiBase}/detect-ai-proxy`, { cache: "no-store" });
+        const result = await response.json();
+        if (!result.ok) {
+          throw new Error(result.error || "代理检测失败");
+        }
+        if (result.firstProxy && !formValue("aiProxyUrl")) {
+          document.getElementById("aiProxyUrl").value = result.firstProxy;
+          scheduleAiConfigAutosave();
+        }
+        const lines = (result.routes || []).map(item => `- ${item.label}：${item.proxyUrl}`);
+        aiAnswer.textContent = lines.length
+          ? `检测到代理候选：\n${lines.join("\n")}\n\n已优先填入第一个代理；如果不想走代理，可以清空“代理地址”。`
+          : "没有检测到系统代理或常见本地代理端口。请确认 Clash/V2Ray 已开启 HTTP 代理，或手动填写 http://127.0.0.1:7890。";
+        aiAnswer.classList.add("show");
+        clearAiError();
+        log(result.message || "代理检测完成。");
+      } catch (error) {
+        showAiError(error.message);
+      } finally {
+        detectProxyBtn.disabled = false;
+      }
+    }
+
+    async function probeAiRoutes() {
+      probeRoutesBtn.disabled = true;
+      aiChatState.textContent = "正在检测全部通道...";
+      log("正在对所有 API 预设做真实网络通道检测……");
+      try {
+        const presets = Object.entries(aiPresets).map(([id, preset]) => ({ id, ...preset }));
+        const response = await fetch(`${apiBase}/probe-ai-routes`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ proxyUrl: formValue("aiProxyUrl"), presets })
+        });
+        const result = await response.json();
+        if (!result.ok) {
+          throw new Error(result.error || "通道检测失败");
+        }
+        const lines = (result.results || []).map(item => {
+          const symbol = item.ok ? "可达" : "失败";
+          const route = item.proxy ? `；通道：${item.label} ${item.proxy}` : item.label ? `；通道：${item.label}` : "";
+          return `${symbol}｜${item.name}｜${item.baseUrl}${route}\n  ${item.message || ""}`;
+        });
+        aiAnswer.textContent = `全部通道检测结果：\n${lines.join("\n")}\n\n说明：HTTP 401/403/405 这类结果也表示网络已到达接口，后续再看 API Key、模型名和额度。`;
+        aiAnswer.classList.add("show");
+        aiChatState.textContent = "通道检测完成";
+        clearAiError();
+      } catch (error) {
+        showAiError(error.message);
+        aiChatState.textContent = "通道检测失败";
+      } finally {
+        probeRoutesBtn.disabled = false;
+      }
+    }
+
+    function scheduleAiConfigAutosave() {
+      window.clearTimeout(aiAutoSaveTimer);
+      aiAutoSaveTimer = window.setTimeout(() => {
+        if ((formValue("aiApiKey") || hasSavedAiKey) && validateAiConfig({ requireApiKey: true })) {
+          saveAiConfig(true).then(saved => {
+            if (saved) log("AI 配置已自动保存到 .env。");
+          });
+        }
+      }, 700);
+    }
+
     async function generateReport() {
       if (!selectedFiles.length) {
         setStatus("error", "还没有 TXT", "先把 TXT 文件拖到左侧输入窗口。");
@@ -751,8 +1211,23 @@
 
       generateBtn.disabled = true;
       downloadBox.classList.remove("show");
-      setStatus("warn", "正在生成 Word", "本地脚本正在整理课程目标、内容详情、代码和运行结果图。");
-      log(`开始生成，TXT 数量：${selectedFiles.length}；同月同日文件将合并为一天，并自动生成代码运行结果图。`);
+      setStatus("warn", "正在生成文件", "本地脚本正在整理 Word、运行结果图和 xlsx 对照表。");
+      log(`开始生成，TXT 数量：${selectedFiles.length}；同月同日文件将合并为一天，并自动生成代码运行结果图和 xlsx 对照表。`);
+
+      if (formChecked("aiEnabled")) {
+        if (!validateAiConfig({ requireApiKey: true })) {
+          setStatus("error", "AI 配置有误", "请修正 AI API 地址、模型名或 API Key 后再生成。");
+          generateBtn.disabled = selectedFiles.length === 0;
+          return;
+        }
+        const saved = await saveAiConfig(true);
+        if (!saved) {
+          setStatus("error", "AI 配置保存失败", "请按提示修正配置后再生成。");
+          generateBtn.disabled = selectedFiles.length === 0;
+          return;
+        }
+        log("AI 配置已同步到 .env，生成报告时会真实调用对应模型；失败时会自动回退本地规则。");
+      }
 
       const data = new FormData();
       selectedFiles.forEach(file => data.append("notes", file, file.name));
@@ -764,14 +1239,20 @@
       data.append("college", formValue("college"));
       data.append("majorClass", formValue("majorClass"));
       data.append("templatePath", formValue("templatePath"));
+      data.append("personalNote", formValue("personalNote"));
       data.append("maxTasks", formValue("maxTasks") || "8");
       data.append("fillCover", formChecked("fillCover") ? "1" : "0");
       data.append("dayPageBreak", formChecked("dayPageBreak") ? "1" : "0");
       data.append("aiEnabled", formChecked("aiEnabled") ? "1" : "0");
+      data.append("aiProvider", aiProviderPreset.value);
       data.append("aiBaseUrl", formValue("aiBaseUrl"));
       data.append("aiApiKey", formValue("aiApiKey"));
       data.append("aiModel", formValue("aiModel"));
-      data.append("aiTemperature", formValue("aiTemperature") || "0.2");
+      data.append("aiTemperature", formValue("aiTemperature") || "0.6");
+      data.append("aiProxyUrl", formValue("aiProxyUrl"));
+      log(formChecked("aiEnabled")
+        ? "AI 增强已开启：将使用网页配置并同步到 .env，后端会真实调用对应 API。"
+        : "AI 增强未开启：本次使用本地反重复规则生成。");
 
       try {
         const response = await fetch(`${apiBase}/generate`, { method: "POST", body: data });
@@ -782,9 +1263,27 @@
         downloadName.textContent = result.filename;
         downloadLink.href = `${apiBase}${result.downloadUrl}`;
         downloadLink.setAttribute("download", result.filename);
+        if (result.xlsxDownloadUrl) {
+          xlsxDownloadRow.style.display = "flex";
+          xlsxDownloadName.textContent = result.xlsxFilename || "对照表.xlsx";
+          xlsxDownloadLink.href = `${apiBase}${result.xlsxDownloadUrl}`;
+          xlsxDownloadLink.setAttribute("download", result.xlsxFilename || "对照表.xlsx");
+        } else {
+          xlsxDownloadRow.style.display = "none";
+        }
         downloadBox.classList.add("show");
-        setStatus("ok", "Word 已生成", result.message || "可以下载生成的实训报告。");
+        setStatus("ok", "文件已生成", result.message || "可以下载生成的实训报告和对照表。");
         log(`生成成功：${result.filename}`);
+        if (result.aiStatus) {
+          if (result.aiStatus.requested && result.aiStatus.used) {
+            log(`AI 状态：已真实调用 API 模型 ${result.aiStatus.model || "未知模型"}。`);
+            (result.aiStatus.events || []).forEach(item => log(`AI 调用记录：${item}`));
+          } else if (result.aiStatus.requested) {
+            log("AI 状态：已请求 AI 增强，但调用失败或配置缺失，已回退本地规则。");
+          } else {
+            log("AI 状态：未使用 API。");
+          }
+        }
         if (Array.isArray(result.warnings) && result.warnings.length) {
           result.warnings.forEach(item => log(`提示：${item}`));
         }
@@ -808,6 +1307,87 @@
       } catch {
         serverState.textContent = "本地服务未启动";
         setStatus("error", "本地服务未启动", "先运行“启动实训报告网页.bat”或 python 实训报告生成器网页.py。");
+      }
+    }
+
+    async function testAiConnection() {
+      if (!validateAiConfig({ requireApiKey: true })) {
+        return;
+      }
+      testAiBtn.disabled = true;
+      log("正在测试 AI 连接……");
+      try {
+        const saved = await saveAiConfig(true);
+        if (!saved) {
+          return;
+        }
+        const response = await fetch(`${apiBase}/test-ai`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(aiConfigPayload())
+        });
+        const result = await response.json();
+        if (!result.ok) {
+          throw new Error(`${result.error || "连接失败"}；当前 Python：${result.pythonPath || "未知"}`);
+        }
+        if (result.savedKey) {
+          hasSavedAiKey = true;
+          aiSavedState.textContent = `已保存 Key：${result.savedKey}`;
+        }
+        log(`AI 连接成功：${result.message || "接口可用"}；模型：${result.model || "未知"}；当前 Python：${result.pythonPath || "未知"}`);
+      } catch (error) {
+        log(`AI 连接测试失败：${error.message}`);
+        showAiError(error.message);
+      } finally {
+        testAiBtn.disabled = false;
+      }
+    }
+
+    async function sendAiMessage() {
+      const message = aiChatInput.value.trim();
+      aiAnswer.classList.remove("show");
+      aiError.classList.remove("show");
+      if (!message) {
+        aiError.textContent = "请输入要发送给 AI 的内容。";
+        aiError.classList.add("show");
+        return;
+      }
+      if (!validateAiConfig({ requireApiKey: true })) {
+        return;
+      }
+      sendAiBtn.disabled = true;
+      aiChatState.textContent = "正在调用真实 API...";
+      log("正在通过 /api/chat 调用后端 AI 中转接口。");
+      try {
+        const saved = await saveAiConfig(true);
+        if (!saved) {
+          aiChatState.textContent = "配置保存失败";
+          return;
+        }
+        const response = await fetch(`${apiBase}/api/chat`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...aiConfigPayload(), message })
+        });
+        const result = await response.json();
+        if (!result.ok) {
+          throw new Error(`${result.error || "AI 调用失败"}；当前 Python：${result.pythonPath || "未知"}`);
+        }
+        aiAnswer.textContent = result.answer || "";
+        aiAnswer.classList.add("show");
+        aiChatState.textContent = `已调用模型：${result.model || "未知"}`;
+        if (result.savedKey) {
+          hasSavedAiKey = true;
+          aiSavedState.textContent = `已保存 Key：${result.savedKey}`;
+        }
+        log(`AI 返回成功：${result.model || "未知模型"}`);
+      } catch (error) {
+        aiError.textContent = error.message;
+        aiError.classList.add("show");
+        aiChatState.textContent = "调用失败";
+        log(`AI 聊天失败：${error.message}`);
+      } finally {
+        sendAiBtn.disabled = false;
       }
     }
 
@@ -839,34 +1419,53 @@
       selectedFiles = [];
       renderFiles();
       fileInput.value = "";
-      setStatus("", "等待 TXT 文件", "把 TXT 拖到左侧后点击生成，Word 会在这里出现下载按钮。");
+      setStatus("", "等待 TXT 文件", "把 TXT 拖到左侧后点击生成，Word 和对照表会在这里出现下载按钮。");
       log("已清空 TXT 列表");
     });
     sampleBtn.addEventListener("click", () => {
       document.querySelectorAll("input[type='text']").forEach(input => input.value = "");
       document.querySelectorAll("input[type='password']").forEach(input => input.value = "");
+      document.querySelectorAll("textarea").forEach(input => input.value = "");
       document.getElementById("maxTasks").value = "8";
-      document.getElementById("aiTemperature").value = "0.2";
+      document.getElementById("aiTemperature").value = "0.6";
       document.getElementById("fillCover").checked = false;
       document.getElementById("dayPageBreak").checked = false;
       document.getElementById("aiEnabled").checked = false;
+      aiProviderPreset.value = "deepseek";
       document.getElementById("aiBox").classList.remove("show");
       log("已重置表单");
     });
     clearLogBtn.addEventListener("click", () => {
       logBox.textContent = "";
     });
+    detectProxyBtn.addEventListener("click", detectAiProxy);
+    probeRoutesBtn.addEventListener("click", probeAiRoutes);
+    saveAiConfigBtn.addEventListener("click", () => saveAiConfig(false));
+    clearAiKeyBtn.addEventListener("click", clearAiKey);
+    testAiBtn.addEventListener("click", testAiConnection);
+    sendAiBtn.addEventListener("click", sendAiMessage);
 
     renderFiles();
     checkServer();
+    refreshAiEnvStatus();
     deepseekPresetBtn.addEventListener("click", () => {
+      const preset = aiPresets[aiProviderPreset.value] || aiPresets.deepseek;
       document.getElementById("aiEnabled").checked = true;
       document.getElementById("aiBox").classList.add("show");
-      document.getElementById("aiBaseUrl").value = "https://api.deepseek.com";
-      document.getElementById("aiModel").value = "deepseek-v4-flash";
-      document.getElementById("aiTemperature").value = "0.2";
-      log("已填入 DeepSeek 预设：API 地址 https://api.deepseek.com，模型 deepseek-v4-flash。");
+      document.getElementById("aiBaseUrl").value = preset.baseUrl;
+      document.getElementById("aiModel").value = preset.model;
+      document.getElementById("aiTemperature").value = preset.temperature;
+      aiAnswer.textContent = `已套用 ${preset.name}：\nAPI 地址：${preset.baseUrl}\n模型：${preset.model}\n温度：${preset.temperature}\n现在把你的 API Key 粘贴到“API Key（隐藏输入）”里即可。`;
+      aiAnswer.classList.add("show");
+      aiError.classList.remove("show");
+      log(`已套用 ${preset.name} 接口预设。请在隐藏输入框里填写 API Key，或留空使用 .env。`);
+      scheduleAiConfigAutosave();
     });
+    ["aiBaseUrl", "aiModel", "aiTemperature", "aiApiKey", "aiProxyUrl"].forEach(id => {
+      document.getElementById(id).addEventListener("input", scheduleAiConfigAutosave);
+      document.getElementById(id).addEventListener("change", scheduleAiConfigAutosave);
+    });
+    aiProviderPreset.addEventListener("change", scheduleAiConfigAutosave);
     document.getElementById("aiEnabled").addEventListener("change", event => {
       document.getElementById("aiBox").classList.toggle("show", event.target.checked);
       log(event.target.checked ? "已开启 AI 增强配置。" : "已关闭 AI 增强。");

@@ -4,6 +4,7 @@ __pycache__/
 .report_web_cache/
 .agents/
 .codex/
+.env
 
 *.pyc
 *.pyo
@@ -14,4 +15,3 @@ __pycache__/
 grouping_test*.docx
 ai_*_smoke.docx
 web_*.docx
-
