@@ -6,8 +6,8 @@
 
 常用示例：p
     python 实训报告生成器.py
-    python 实训报告生成器.py 笔记1.txt 笔记2.txt 笔记3.txt --output 计科1班-2组-2023032175-折柯阳.docx
-    python 实训报告生成器.py --screenshots 截图文件夹 --fill-cover --college 计算机科学与技术 --major-class 23060101 --student-id 2023032175 --name 折柯阳
+    python 实训报告生成器.py 笔记1.txt 笔记2.txt 笔记3.txt --output 班级-组号-学号-姓名.docx
+    python 实训报告生成器.py --screenshots 截图文件夹 --fill-cover --college 学院 --major-class 专业班级 --student-id 学号 --name 姓名
 """
 
 from __future__ import annotations
@@ -94,6 +94,65 @@ SAMPLE_TEXT_LINES = [
     "本次练习完成了输入、处理和输出的基本流程。",
     "课堂中重点观察了代码运行结果和变量变化。",
     "通过调试可以更清楚地理解程序执行顺序。",
+]
+EXPLICIT_TASK_PATTERN = r"(?:实训任务|课堂任务|课堂练习|上机练习|课后练习|练习|任务)"
+CODE_ACTION_KEYWORDS = (
+    "代码",
+    "程序",
+    "编写",
+    "实现",
+    "运行",
+    "调试",
+    "输出",
+    "输入",
+    "绘制",
+    "生成",
+    "调用",
+    "定义",
+    "遍历",
+    "读取",
+    "写入",
+)
+PYTHON_CODE_KEYWORDS = (
+    "print",
+    "input",
+    "for",
+    "while",
+    "if",
+    "elif",
+    "else",
+    "def",
+    "return",
+    "import",
+    "range",
+    "type",
+    "open",
+    "read",
+    "write",
+    "upper",
+    "lower",
+    "split",
+    "join",
+    "find",
+    "count",
+    "replace",
+    "strip",
+    "append",
+    "sort",
+    "len",
+    "plt",
+    "matplotlib",
+    "pandas",
+    "numpy",
+)
+PARALLEL_CODE_TOPIC_ALIASES = [
+    ("柱状图", ("柱状图", "条形图", "bar")),
+    ("折线图", ("折线图", "曲线图", "line")),
+    ("饼图", ("饼图", "圆饼图", "pie")),
+    ("散点图", ("散点图", "scatter")),
+    ("直方图", ("直方图", "hist")),
+    ("箱线图", ("箱线图", "箱型图", "boxplot")),
+    ("雷达图", ("雷达图", "radar")),
 ]
 GENERATION_WARNINGS: list[str] = []
 AI_USAGE_EVENTS: list[str] = []
@@ -660,9 +719,9 @@ def build_ai_prompt(
 3. 课程目标反向概括当天学习目标。
 4. 课程内容只写知识点名称，用数组列出。
 5. 课程内容详情用数组列出，每条是完整句子。
-6. 课程代码及执行过程只能根据 TXT 里明确出现的任务/练习生成，不允许自行补充任务。
+6. 练习和任务提取规则：如果 TXT 里明确出现“练习”“任务”“实训任务”“课堂练习”等内容，只能提取这些明确任务；如果没有明确任务，则从 TXT 中涉及代码的语句、代码片段、代码操作步骤中提取任务；如果两类内容都没有，tasks 才能为空。
 7. code 必须是纯文本 Python 代码，不要图片，不要 Markdown 代码块。
-8. 最多生成 {max_tasks} 个任务；如果本地规则底稿里的 tasks 为空，返回的 tasks 必须为空数组。
+8. 最多生成 {max_tasks} 个任务；如果本地规则底稿里的 tasks 为空，返回的 tasks 必须为空数组；如果底稿 tasks 是由代码类知识点提取出来的，也必须保留对应任务，不要删空。
 9. 目标、详情和任务说明要主动变换句式，不要照搬固定模板。
 10. Python 代码里的变量名、示例数据和输出文本要自然变化，避免和底稿完全一致。
 11. 差异化参考编号：{variation_seed or fallback.source.stem}-{fallback.day_index}。
@@ -673,6 +732,7 @@ def build_ai_prompt(
 16. 保持学生实训报告口吻，不要写成 AI 总结稿、宣传稿或论文。
 17. 必须根据“个性化要求”微调表达角度、示例侧重点和总结语气；如果个性化要求为空，也要从 TXT 原文中提炼差异化表达。
 18. 避免与本地规则底稿使用相同开头、相同结尾、相同段落顺序；如果某一条内容和底稿高度相似，请重写后再输出。
+19. 如果 TXT 中出现“生成柱状图、折线图、饼图、散点图”等并列代码类知识点，必须拆成多个独立 task，每个 task 分别给出代码。
 
 JSON 格式：
 {{
@@ -1552,13 +1612,203 @@ def diversify_code(code: str, rng: random.Random, index: int) -> str:
         if old in result:
             choice = values[(rng.randrange(len(values)) + index) % len(values)]
             result = result.replace(old, choice)
+    result = diversify_plot_titles(result, rng, index)
+    result = diversify_plot_data(result, rng)
     result = diversify_code_variables(result, rng, index)
     return result
 
 
+def diversify_plot_titles(code: str, rng: random.Random, index: int) -> str:
+    if "plt.title" not in code:
+        return code
+    title_pools = {
+        "柱状图": ["小组成绩对比柱状图", "课堂练习完成情况柱状图", "数据指标柱状展示"],
+        "折线图": ["学习进度折线图", "实训数据变化折线图", "每日任务完成趋势图"],
+        "饼图": ["知识点占比饼图", "课堂时间分配饼图", "练习内容结构饼图"],
+        "散点图": ["学习时长与成绩散点图", "任务数量与完成时间散点图", "样本数据关系散点图"],
+        "直方图": ["成绩分布直方图", "样本区间分布直方图", "数据频数直方图"],
+        "箱线图": ["成绩分布箱线图", "样本离散情况箱线图", "数据波动箱线图"],
+        "雷达图": ["能力维度雷达图", "学习能力对比雷达图", "综合指标雷达图"],
+    }
+    pool: list[str] = []
+    for key, values in title_pools.items():
+        if key in code:
+            pool = values
+            break
+    if not pool:
+        return code
+    title = pool[(rng.randrange(len(pool)) + index) % len(pool)]
+    return re.sub(r'plt\.title\("([^"]*)"\)', f'plt.title("{title}")', code, count=1)
+
+
+def diversify_plot_data(code: str, rng: random.Random) -> str:
+    if "matplotlib" not in code and "plt." not in code:
+        return code
+
+    def replace_numeric_list(match: re.Match) -> str:
+        name = match.group(1)
+        original = match.group(2)
+        count = max(3, len(re.findall(r"-?\d+(?:\.\d+)?", original)))
+        if name in {"hours", "study_hours", "practice_hours", "time_values", "task_count"}:
+            numbers = list(range(1, count + 1))
+        elif name in {"rates", "percent_values", "ratio_values", "share_values"}:
+            numbers = [rng.randint(12, 38) for _ in range(count)]
+        elif name in {"minutes", "finish_time"}:
+            start = rng.randint(22, 42)
+            numbers = [start + rng.randint(6, 15) * idx for idx in range(count)]
+        else:
+            numbers = [rng.randint(58, 96) for _ in range(count)]
+        return f"{name} = [{', '.join(str(number) for number in numbers)}]"
+
+    return re.sub(
+        r"\b(values|scores|minutes|progress|counts|rates|finish_time|task_count|hours|study_hours|practice_hours|time_values|score_values|data_values|metric_values)\s*=\s*\[([^\]]+)\]",
+        replace_numeric_list,
+        code,
+    )
+
+
 def choose_structural_code_variant(code: str, rng: random.Random, index: int) -> str:
     variants: list[str] = []
-    if "请输入用户名" in code and "upper" in code:
+    if "matplotlib.pyplot" in code and "柱状图" in code:
+        variants = [
+            """
+            import matplotlib.pyplot as plt
+
+            groups = ["A组", "B组", "C组", "D组"]
+            values = [78, 86, 91, 83]
+
+            plt.rcParams["font.sans-serif"] = ["SimHei"]
+            plt.bar(groups, values, color=["#0A84FF", "#30C7B5", "#FF9500", "#AF52DE"])
+            plt.title("小组成绩对比柱状图")
+            plt.xlabel("小组")
+            plt.ylabel("成绩")
+            print("柱状图已生成，最高成绩：", max(values))
+            plt.show()
+            """,
+            """
+            import matplotlib.pyplot as plt
+
+            labels = ["理论", "练习", "调试", "整理"]
+            minutes = [35, 55, 30, 25]
+
+            plt.rcParams["font.sans-serif"] = ["SimHei"]
+            plt.barh(labels, minutes, color="#5B8DEF")
+            plt.title("课堂时间分配条形图")
+            print("条形图已生成，总时长：", sum(minutes))
+            plt.show()
+            """,
+        ]
+    elif "matplotlib.pyplot" in code and "折线图" in code:
+        variants = [
+            """
+            import matplotlib.pyplot as plt
+
+            weeks = ["第1周", "第2周", "第3周", "第4周"]
+            progress = [45, 62, 78, 91]
+
+            plt.rcParams["font.sans-serif"] = ["SimHei"]
+            plt.plot(weeks, progress, marker="o", linewidth=2)
+            plt.title("实训进度折线图")
+            plt.xlabel("时间")
+            plt.ylabel("进度")
+            print("折线图已生成，最终进度：", progress[-1])
+            plt.show()
+            """,
+            """
+            import matplotlib.pyplot as plt
+
+            days = list(range(1, 6))
+            counts = [3, 5, 4, 7, 8]
+
+            plt.plot(days, counts, marker="s", color="#34C759")
+            plt.title("每日练习数量变化")
+            print("折线图已生成，平均数量：", sum(counts) / len(counts))
+            plt.show()
+            """,
+        ]
+    elif "matplotlib.pyplot" in code and ("饼图" in code or "pie(" in code):
+        variants = [
+            """
+            import matplotlib.pyplot as plt
+
+            labels = ["输入输出", "字符串", "函数", "文件读写"]
+            rates = [20, 30, 25, 25]
+
+            plt.rcParams["font.sans-serif"] = ["SimHei"]
+            plt.pie(rates, labels=labels, autopct="%1.1f%%")
+            plt.title("知识点占比饼图")
+            print("饼图已生成，分类数量：", len(labels))
+            plt.show()
+            """,
+            """
+            import matplotlib.pyplot as plt
+
+            items = ["讲解", "演示", "练习", "总结"]
+            values = [30, 20, 35, 15]
+
+            plt.rcParams["font.sans-serif"] = ["SimHei"]
+            plt.pie(values, labels=items, startangle=120)
+            print("饼图已生成，总占比：", sum(values))
+            plt.show()
+            """,
+        ]
+    elif "matplotlib.pyplot" in code and ("散点图" in code or "scatter(" in code):
+        variants = [
+            """
+            import matplotlib.pyplot as plt
+
+            hours = [1, 2, 3, 4, 5, 6]
+            scores = [61, 69, 76, 84, 88, 94]
+
+            plt.rcParams["font.sans-serif"] = ["SimHei"]
+            plt.scatter(hours, scores, c=scores, cmap="viridis")
+            plt.title("学习时长与成绩散点图")
+            plt.xlabel("学习时长")
+            plt.ylabel("成绩")
+            print("散点图已生成，样本数量：", len(hours))
+            plt.show()
+            """,
+            """
+            import matplotlib.pyplot as plt
+
+            task_count = [2, 3, 4, 5, 6]
+            finish_time = [38, 45, 57, 70, 83]
+
+            plt.scatter(task_count, finish_time, color="#FF9500")
+            plt.title("任务数量与完成时间")
+            print("散点图已生成，最大任务数：", max(task_count))
+            plt.show()
+            """,
+        ]
+    elif "转换为大写" in code and "转换为小写" in code:
+        variants = [
+            """
+            raw_text = input("请输入一段英文或用户名：")
+
+            print("原始内容：", raw_text)
+            print("转换为大写：", raw_text.upper())
+            print("转换为小写：", raw_text.lower())
+            """,
+            """
+            source_text = input("请输入需要转换的英文内容：")
+            upper_text = source_text.upper()
+            lower_text = source_text.lower()
+
+            print(f"大写结果：{upper_text}")
+            print(f"小写结果：{lower_text}")
+            """,
+            """
+            account = input("请输入账号或英文单词：")
+            converted = {
+                "upper": account.upper(),
+                "lower": account.lower(),
+            }
+
+            for key, value in converted.items():
+                print(key, "=>", value)
+            """,
+        ]
+    elif "请输入用户名" in code and "upper" in code:
         variants = [
             """
             username = input("请输入用户名（包含数字、字母、下划线，长度为8）：")
@@ -1787,6 +2037,11 @@ def choose_structural_code_variant(code: str, rng: random.Random, index: int) ->
 def diversify_code_variables(code: str, rng: random.Random, index: int) -> str:
     variable_bank = {
         "username": ["account", "user_name", "login_name"],
+        "account": ["login_name", "user_account", "input_text"],
+        "converted": ["case_result", "format_map", "text_forms"],
+        "raw_text": ["source_text", "input_text", "origin_text"],
+        "upper_text": ["big_text", "upper_result", "uppercase_value"],
+        "lower_text": ["small_text", "lower_result", "lowercase_value"],
         "class_name": ["class_no", "major_class", "class_id"],
         "group": ["group_no", "team_no", "group_id"],
         "name": ["student_name", "user_name", "person_name"],
@@ -1808,6 +2063,15 @@ def diversify_code_variables(code: str, rng: random.Random, index: int) -> str:
         "samples": ["sample_values", "data_samples", "type_samples"],
         "type_name": ["label", "data_name", "sample_name"],
         "value": ["sample", "data_value", "item_value"],
+        "groups": ["teams", "class_groups", "group_names"],
+        "values": ["score_values", "data_values", "metric_values"],
+        "scores": ["score_list", "grade_values", "result_scores"],
+        "labels": ["category_names", "item_labels", "legend_labels"],
+        "rates": ["percent_values", "ratio_values", "share_values"],
+        "days": ["date_labels", "day_names", "time_points"],
+        "weeks": ["week_labels", "stage_names", "periods"],
+        "progress": ["progress_values", "finish_rates", "trend_values"],
+        "hours": ["study_hours", "practice_hours", "time_values"],
     }
     result = code
     for old, variants in variable_bank.items():
@@ -1855,6 +2119,13 @@ def generate_details(topics: list[str], text: str) -> list[str]:
 
 
 def extract_tasks(text: str) -> list[TaskItem]:
+    explicit_tasks = extract_explicit_tasks(text)
+    if explicit_tasks:
+        return explicit_tasks
+    return extract_code_related_tasks(text)
+
+
+def extract_explicit_tasks(text: str) -> list[TaskItem]:
     lines = clean_lines(text, keep_indent=True)
     tasks: list[TaskItem] = []
     current_title = ""
@@ -1874,7 +2145,7 @@ def extract_tasks(text: str) -> list[TaskItem]:
         if not line:
             continue
 
-        direct_task = re.match(r"^(?:练习|任务)\s*\d*\s*[：:、.．]\s*(.+)$", line)
+        direct_task = re.match(rf"^{EXPLICIT_TASK_PATTERN}\s*(?:\d+|[一二三四五六七八九十]+)?\s*[：:、.．]\s*(.+)$", line)
         if direct_task and direct_task.group(1).strip():
             flush_current()
             in_exercise = True
@@ -1882,23 +2153,165 @@ def extract_tasks(text: str) -> list[TaskItem]:
             current_lines = [direct_task.group(1)]
             continue
 
-        if re.match(r"^(?:练习|任务)[:：]?$", line):
+        if re.match(rf"^{EXPLICIT_TASK_PATTERN}\s*(?:\d+|[一二三四五六七八九十]+)?\s*[:：]?$", line):
             in_exercise = True
             flush_current()
+            continue
+        if in_exercise and is_non_task_section_line(line):
+            flush_current()
+            in_exercise = False
             continue
         if in_exercise and re.match(r"^[一二三四五六七八九十]+[、.．]\s*", line):
             break
         if in_exercise:
-            match = re.match(r"^\s*(\d+)[.、]\s*(.+)$", raw_line)
+            match = re.match(r"^\s*(?:[（(]?(?:\d+|[一二三四五六七八九十]+)[）).、．]|[-*])\s*(.+)$", raw_line)
             if match:
                 flush_current()
-                current_title = infer_task_title(match.group(2))
-                current_lines = [match.group(2)]
+                current_title = infer_task_title(match.group(1))
+                current_lines = [match.group(1)]
             else:
                 current_lines.append(line)
 
     flush_current()
     return tasks
+
+
+def extract_code_related_tasks(text: str) -> list[TaskItem]:
+    lines = clean_lines(text, keep_indent=True)
+    tasks: list[TaskItem] = []
+
+    tasks.extend(extract_python_snippet_tasks(lines))
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or is_assignment_line(line) or is_explicit_task_marker_line(line):
+            continue
+        if looks_like_python_code_line(line):
+            continue
+
+        parallel_topics = extract_parallel_code_topics(line)
+        if len(parallel_topics) >= 2:
+            for topic in parallel_topics:
+                tasks.append(build_code_topic_task(topic, line))
+            remainder = remove_parallel_topic_words(line)
+            if is_code_related_line(remainder):
+                tasks.append(build_code_line_task(remainder))
+            continue
+
+        if is_code_related_line(line):
+            tasks.append(build_code_line_task(line))
+
+    return merge_tasks(tasks)
+
+
+def extract_python_snippet_tasks(lines: list[str]) -> list[TaskItem]:
+    tasks: list[TaskItem] = []
+    block: list[str] = []
+
+    def flush_block() -> None:
+        nonlocal block
+        code = normalize_code_block(block)
+        block = []
+        if not code or not is_probable_python_snippet(code):
+            return
+        title = infer_task_title(code)
+        requirement = "运行 TXT 中记录的 Python 代码片段，观察代码执行过程和输出结果。"
+        tasks.append(TaskItem(title=title, requirement=requirement, code=code, caption=cleanup_caption(title)))
+
+    for raw_line in lines:
+        line = raw_line.rstrip()
+        stripped = line.strip()
+        if looks_like_python_code_line(stripped) or (block and line.startswith((" ", "\t"))):
+            block.append(line)
+            continue
+        flush_block()
+    flush_block()
+    return merge_tasks(tasks)
+
+
+def normalize_code_block(lines: list[str]) -> str:
+    useful = [line.rstrip() for line in lines if line.strip()]
+    if not useful:
+        return ""
+    min_indent = min((len(line) - len(line.lstrip(" "))) for line in useful if line.strip())
+    return "\n".join(line[min_indent:] if len(line) >= min_indent else line for line in useful).strip()
+
+
+def is_probable_python_snippet(code: str) -> bool:
+    if len(code) < 4:
+        return False
+    try:
+        ast.parse(code)
+        return True
+    except SyntaxError:
+        return bool(re.search(r"\b(print|input|for|while|def|import|return|open)\b", code, flags=re.IGNORECASE))
+
+
+def looks_like_python_code_line(line: str) -> bool:
+    if not line:
+        return False
+    if re.match(r"^(?:print|input|for|while|if|elif|else|def|return|import|from|with|class)\b", line):
+        return True
+    if re.search(r"\b(?:plt|pd|np)\.", line):
+        return True
+    if re.search(r"\b(?:upper|lower|split|join|find|count|replace|strip|append|sort|read|write|open|range|type|len)\s*\(", line) and not re.search(r"[\u4e00-\u9fff]", line):
+        return True
+    if re.match(r"^[A-Za-z_]\w*\s*=", line) and not re.search(r"[，。；：、]", line):
+        return True
+    return False
+
+
+def is_code_related_line(line: str) -> bool:
+    lowered = line.lower()
+    if extract_parallel_code_topics(line):
+        return True
+    if any(keyword in lowered for keyword in PYTHON_CODE_KEYWORDS):
+        return True
+    if ("图" in line and any(word in line for word in ("生成", "绘制", "画", "可视化", "展示"))):
+        return True
+    if any(action in line for action in CODE_ACTION_KEYWORDS) and ("Python" in line or "python" in lowered or "函数" in line or "变量" in line):
+        return True
+    return False
+
+
+def is_explicit_task_marker_line(line: str) -> bool:
+    return bool(re.match(rf"^{EXPLICIT_TASK_PATTERN}\s*(?:\d+|[一二三四五六七八九十]+)?\s*[:：]?$", line.strip()))
+
+
+def is_non_task_section_line(line: str) -> bool:
+    return bool(re.match(r"^(?:课程目标|课程内容|课程内容详情|知识点|课堂内容|学习内容|提交要求|报告要求)\s*[:：]", line.strip()))
+
+
+def extract_parallel_code_topics(line: str) -> list[str]:
+    lowered = line.lower()
+    topics: list[str] = []
+    for canonical, aliases in PARALLEL_CODE_TOPIC_ALIASES:
+        if any(alias.lower() in lowered for alias in aliases):
+            topics.append(canonical)
+    return unique_keep_order(topics)
+
+
+def remove_parallel_topic_words(line: str) -> str:
+    result = line
+    for _canonical, aliases in PARALLEL_CODE_TOPIC_ALIASES:
+        for alias in aliases:
+            if re.fullmatch(r"[A-Za-z_]+", alias):
+                result = re.sub(rf"\b{re.escape(alias)}\b", "", result, flags=re.IGNORECASE)
+            else:
+                result = result.replace(alias, "")
+    result = re.sub(r"[、,，/]+", "，", result)
+    return cleanup_requirement(result)
+
+
+def build_code_topic_task(topic: str, source_line: str) -> TaskItem:
+    title = infer_task_title(topic)
+    requirement = f"根据 TXT 中“{cleanup_requirement(source_line)}”这一并列知识点，单独编写代码完成{topic}生成，并观察运行结果。"
+    return build_task(title, requirement)
+
+
+def build_code_line_task(line: str) -> TaskItem:
+    title = infer_task_title(line)
+    requirement = f"根据 TXT 中涉及代码的内容“{cleanup_requirement(line)}”，编写 Python 示例并观察运行结果。"
+    return build_task(title, requirement)
 
 
 def suggest_tasks_from_keywords(text: str, existing: list[TaskItem]) -> list[TaskItem]:
@@ -1931,6 +2344,21 @@ def build_task(title: str, requirement: str) -> TaskItem:
 
 def generate_code(title: str, requirement: str) -> str:
     text = f"{title} {requirement}"
+    lowered = text.lower()
+    if "柱状图" in text or "条形图" in text:
+        return generate_chart_code("柱状图")
+    if "折线图" in text or "曲线图" in text:
+        return generate_chart_code("折线图")
+    if "饼图" in text or "圆饼图" in text:
+        return generate_chart_code("饼图")
+    if "散点图" in text:
+        return generate_chart_code("散点图")
+    if "直方图" in text:
+        return generate_chart_code("直方图")
+    if "箱线图" in text or "箱型图" in text:
+        return generate_chart_code("箱线图")
+    if "雷达图" in text:
+        return generate_chart_code("雷达图")
     if contains_all(text, ("用户名", "大写")):
         return dedent(
             """
@@ -1942,6 +2370,16 @@ def generate_code(title: str, requirement: str) -> str:
                 print("用户名格式不符合要求")
             """
         ).strip()
+    if "upper" in lowered or "lower" in lowered or ("大写" in text and "小写" in text):
+        return dedent(
+            """
+            raw_text = input("请输入一段英文或用户名：")
+
+            print("原始内容：", raw_text)
+            print("转换为大写：", raw_text.upper())
+            print("转换为小写：", raw_text.lower())
+            """
+        ).strip()
     if "足球" in text:
         return dedent(
             """
@@ -1951,6 +2389,27 @@ def generate_code(title: str, requirement: str) -> str:
             print("第1个'足球'出现的位置：", news.find("足球"))
             print("'足球'出现的次数：", news.count("足球"))
             print("替换后的新闻：", news.replace("的", "地"))
+            """
+        ).strip()
+    if "find" in lowered or "count" in lowered or "查找" in text or "统计" in text:
+        return dedent(
+            """
+            article = "Python课堂练习中，Python可以处理文本、数据和图表。"
+            keyword = "Python"
+
+            print("原始文本：", article)
+            print("关键词首次出现位置：", article.find(keyword))
+            print("关键词出现次数：", article.count(keyword))
+            """
+        ).strip()
+    if "replace" in lowered or "替换" in text:
+        return dedent(
+            """
+            sentence = "Python实训需要记录代码过程，代码运行结果也要保存。"
+            new_sentence = sentence.replace("代码", "程序")
+
+            print("替换前：", sentence)
+            print("替换后：", new_sentence)
             """
         ).strip()
     if "strip" in text.lower() or "去掉字符串前后" in text or "前后的空格" in text:
@@ -2069,7 +2528,18 @@ def generate_code(title: str, requirement: str) -> str:
                 print(type_name, "：", value, "，类型为：", type(value))
             """
         ).strip()
-    if "输入" in text and "输出" in text:
+    if "列表" in text or "字典" in text or "元组" in text or "集合" in text:
+        return dedent(
+            """
+            student = {"姓名": "陈宇", "班级": "23060101", "成绩": [86, 91, 88]}
+
+            print("学生姓名：", student["姓名"])
+            print("所在班级：", student["班级"])
+            print("第一次成绩：", student["成绩"][0])
+            print("平均成绩：", sum(student["成绩"]) / len(student["成绩"]))
+            """
+        ).strip()
+    if "输入" in text and "输出" in text or "input" in lowered or "print" in lowered:
         return dedent(
             """
             class_name = input("请输入班级：")
@@ -2087,6 +2557,114 @@ def generate_code(title: str, requirement: str) -> str:
         print("请根据课堂运行结果补充截图。")
         """
     ).strip()
+
+
+def generate_chart_code(kind: str) -> str:
+    if kind == "柱状图":
+        body = """
+        import matplotlib.pyplot as plt
+
+        names = ["第一组", "第二组", "第三组", "第四组"]
+        scores = [82, 91, 76, 88]
+
+        plt.rcParams["font.sans-serif"] = ["SimHei"]
+        plt.rcParams["axes.unicode_minus"] = False
+        plt.bar(names, scores, color="#5B8DEF")
+        plt.title("小组成绩柱状图")
+        plt.xlabel("小组")
+        plt.ylabel("成绩")
+        print("柱状图已生成，数据项数量：", len(scores))
+        plt.show()
+        """
+    elif kind == "折线图":
+        body = """
+        import matplotlib.pyplot as plt
+
+        days = ["周一", "周二", "周三", "周四", "周五"]
+        values = [68, 74, 81, 79, 90]
+
+        plt.rcParams["font.sans-serif"] = ["SimHei"]
+        plt.rcParams["axes.unicode_minus"] = False
+        plt.plot(days, values, marker="o", color="#34C759")
+        plt.title("学习进度折线图")
+        plt.xlabel("日期")
+        plt.ylabel("完成度")
+        print("折线图已生成，最高值：", max(values))
+        plt.show()
+        """
+    elif kind == "饼图":
+        body = """
+        import matplotlib.pyplot as plt
+
+        labels = ["理论学习", "代码练习", "结果整理", "问题调试"]
+        sizes = [25, 40, 20, 15]
+
+        plt.rcParams["font.sans-serif"] = ["SimHei"]
+        plt.pie(sizes, labels=labels, autopct="%1.1f%%", startangle=90)
+        plt.title("课堂时间分配饼图")
+        print("饼图已生成，分类数量：", len(labels))
+        plt.show()
+        """
+    elif kind == "散点图":
+        body = """
+        import matplotlib.pyplot as plt
+
+        study_hours = [1, 2, 3, 4, 5, 6]
+        scores = [58, 66, 75, 82, 87, 93]
+
+        plt.rcParams["font.sans-serif"] = ["SimHei"]
+        plt.scatter(study_hours, scores, color="#FF9500")
+        plt.title("学习时长与成绩散点图")
+        plt.xlabel("学习时长")
+        plt.ylabel("成绩")
+        print("散点图已生成，样本数量：", len(study_hours))
+        plt.show()
+        """
+    elif kind == "直方图":
+        body = """
+        import matplotlib.pyplot as plt
+
+        scores = [62, 75, 81, 88, 90, 93, 70, 84, 79, 96]
+
+        plt.rcParams["font.sans-serif"] = ["SimHei"]
+        plt.hist(scores, bins=5, color="#AF52DE", edgecolor="white")
+        plt.title("成绩分布直方图")
+        print("直方图已生成，样本数量：", len(scores))
+        plt.show()
+        """
+    elif kind == "箱线图":
+        body = """
+        import matplotlib.pyplot as plt
+
+        scores = [62, 75, 81, 88, 90, 93, 70, 84, 79, 96]
+
+        plt.rcParams["font.sans-serif"] = ["SimHei"]
+        plt.boxplot(scores)
+        plt.title("成绩分布箱线图")
+        print("箱线图已生成，中位数附近数据已展示。")
+        plt.show()
+        """
+    else:
+        body = """
+        import matplotlib.pyplot as plt
+        import math
+
+        labels = ["A", "B", "C", "D", "E"]
+        values = [80, 90, 75, 88, 92]
+        angles = [index / float(len(labels)) * 2 * math.pi for index in range(len(labels))]
+        values.append(values[0])
+        angles.append(angles[0])
+
+        plt.rcParams["font.sans-serif"] = ["SimHei"]
+        ax = plt.subplot(111, polar=True)
+        ax.plot(angles, values, "o-", linewidth=2)
+        ax.fill(angles, values, alpha=0.25)
+        ax.set_thetagrids([angle * 180 / math.pi for angle in angles[:-1]], labels)
+        plt.title("能力维度雷达图")
+        print("雷达图已生成，维度数量：", len(labels))
+        plt.show()
+        """
+    return dedent(body).strip()
 
 
 def build_comparison_rows(report: DayReport, raw_text: str, group: SourceGroup | None = None) -> list[ComparisonRow]:
@@ -2532,10 +3110,18 @@ def is_safe_open_call(node: ast.Call) -> bool:
 
 def simulate_code_output(task: TaskItem) -> str:
     code = task.code
+    task_text = f"{task.title} {task.requirement} {code}"
     rng = random.Random(f"simulate-{hashlib.md5(code.encode('utf-8')).hexdigest()[:12]}")
+    for chart_name in ("柱状图", "折线图", "饼图", "散点图", "直方图", "箱线图", "雷达图"):
+        if chart_name in task_text:
+            sample_count = rng.randint(4, 8)
+            return f"{chart_name}已生成，样本数量： {sample_count}\n图表标题、坐标轴或分类标签已完成设置。"
     if "请输入用户名" in code and "upper()" in code:
         username = make_sample_username(rng)
         return f"请输入用户名（包含数字、字母、下划线，长度为8）：{username}\n用户名： {username.upper()}"
+    if "转换为大写" in code and "转换为小写" in code:
+        sample = make_sample_username(rng)
+        return f"请输入一段英文或用户名：{sample}\n原始内容： {sample}\n转换为大写： {sample.upper()}\n转换为小写： {sample.lower()}"
     if "原始新闻" in code and "足球" in code:
         return "\n".join(
             [
@@ -2545,6 +3131,10 @@ def simulate_code_output(task: TaskItem) -> str:
                 "替换后的新闻： 在昨晚进行地一场足球比赛中，主场作战地球队以3比1战胜了客队。足球运动吸引了众多球迷观看，年轻球员地配合提升了足球进攻地效率。",
             ]
         )
+    if "关键词首次出现位置" in code and "关键词出现次数" in code:
+        return "原始文本： Python课堂练习中，Python可以处理文本、数据和图表。\n关键词首次出现位置： 0\n关键词出现次数： 2"
+    if "替换前" in code and "替换后" in code:
+        return "替换前： Python实训需要记录代码过程，代码运行结果也要保存。\n替换后： Python实训需要记录程序过程，程序运行结果也要保存。"
     if "strip()" in code or ".strip()" in code:
         return "原始字符串： '\\n\\n\\n我们正在进行暑假实训\\n\\n\\n'\n去除前后空白后： '我们正在进行暑假实训'"
     if "split(" in code and "join(" in code:
@@ -2823,14 +3413,45 @@ def infer_day_title(source: Path, text: str, topics: list[str]) -> str:
 
 def infer_task_title(requirement: str) -> str:
     text = cleanup_requirement(requirement)
+    lowered = text.lower()
+    if "柱状图" in text or "条形图" in text:
+        return "柱状图生成"
+    if "折线图" in text or "曲线图" in text:
+        return "折线图生成"
+    if "饼图" in text or "圆饼图" in text:
+        return "饼图生成"
+    if "散点图" in text:
+        return "散点图生成"
+    if "直方图" in text:
+        return "直方图生成"
+    if "箱线图" in text or "箱型图" in text:
+        return "箱线图生成"
+    if "雷达图" in text:
+        return "雷达图生成"
     if "用户名" in text and "大写" in text:
         return "用户名大写输出"
+    if "upper" in lowered or "lower" in lowered or ("大写" in text and "小写" in text):
+        return "字符串大小写转换"
     if "足球" in text:
         return "足球新闻字符串查找、统计与替换"
+    if "find" in lowered or "count" in lowered or "查找" in text or "统计" in text:
+        return "字符串查找与统计"
+    if "replace" in lowered or "替换" in text:
+        return "字符串replace()替换"
     if "去掉" in text and "空格" in text or "strip" in text.lower():
         return "字符串strip()去空"
     if "拆分" in text or "连接成字符串" in text or "join" in text.lower():
         return "字符串split()拆分与join()组合"
+    if "数据类型" in text or "type" in lowered or "列表" in text or "字典" in text:
+        return "数据类型与元素访问"
+    if "输入" in text and "输出" in text or "input" in lowered or "print" in lowered:
+        return "输入输出程序"
+    if "函数" in text or "def" in lowered or "return" in lowered:
+        return "函数定义与返回值"
+    if "循环" in text or "for" in lowered or "while" in lowered:
+        return "循环结构程序"
+    if "文件" in text or "open" in lowered or "read" in lowered or "write" in lowered:
+        return "文件读写程序"
     return cleanup_caption(text[:28]) or "课堂练习"
 
 

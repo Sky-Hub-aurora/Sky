@@ -97,7 +97,8 @@
       gap: 18px;
       width: min(1220px, calc(100vw - 32px));
       margin: 18px auto;
-      min-height: calc(100vh - 94px);
+      height: calc(100vh - 94px);
+      min-height: 0;
     }
 
     .panel {
@@ -114,7 +115,8 @@
     .input-panel {
       display: grid;
       grid-template-rows: auto minmax(0, 1fr);
-      max-height: calc(100vh - 94px);
+      height: 100%;
+      min-height: 0;
     }
 
     .panel-header {
@@ -219,9 +221,16 @@
       display: grid;
       gap: 8px;
       margin-top: 14px;
-      max-height: clamp(150px, 24vh, 260px);
+      max-height: clamp(150px, 24vh, 280px);
       overflow: auto;
       padding-right: 2px;
+    }
+
+    .scroll-hint {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
     }
 
     .file-row {
@@ -475,13 +484,16 @@
     .output-panel {
       display: grid;
       grid-template-rows: auto minmax(0, 1fr);
+      height: 100%;
+      min-height: 0;
     }
 
     .result-area {
       display: grid;
+      grid-template-rows: auto auto minmax(0, 1fr);
       gap: 14px;
       padding: 16px;
-      min-height: 100%;
+      min-height: 0;
       align-content: start;
     }
 
@@ -580,8 +592,8 @@
     }
 
     .log {
-      min-height: 360px;
-      max-height: calc(100vh - 280px);
+      min-height: 0;
+      height: 100%;
       overflow: auto;
       margin: 0;
       padding: 14px;
@@ -611,6 +623,17 @@
     @media (max-width: 900px) {
       .workspace {
         grid-template-columns: 1fr;
+        height: auto;
+        min-height: calc(100vh - 94px);
+      }
+
+      .input-panel,
+      .output-panel {
+        height: auto;
+      }
+
+      .log {
+        min-height: 300px;
       }
 
       .topbar {
@@ -670,6 +693,7 @@
           </div>
 
           <div class="file-list" id="fileList"></div>
+          <div class="scroll-hint">TXT 多的时候在这个输入窗口内部上下滑动，右侧产出窗口不会被文件列表顶走。</div>
 
           <div class="settings">
             <div class="field-grid">
@@ -733,6 +757,10 @@
                   <option value="qwen">通义千问</option>
                   <option value="zhipu">智谱清言</option>
                   <option value="siliconflow">硅基流动</option>
+                  <option value="doubao">豆包/火山方舟</option>
+                  <option value="minimax">MiniMax</option>
+                  <option value="yi">零一万物</option>
+                  <option value="custom">自定义兼容接口</option>
                 </select>
                 <button class="secondary" id="deepseekPresetBtn" type="button">套用接口预设</button>
                 <button class="secondary" id="detectProxyBtn" type="button">检测代理</button>
@@ -888,6 +916,30 @@
         baseUrl: "https://api.siliconflow.cn/v1",
         model: "Qwen/Qwen2.5-7B-Instruct",
         temperature: "0.4"
+      },
+      doubao: {
+        name: "豆包/火山方舟",
+        baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
+        model: "doubao-seed-1-6-flash-250615",
+        temperature: "0.4"
+      },
+      minimax: {
+        name: "MiniMax",
+        baseUrl: "https://api.minimax.chat/v1",
+        model: "MiniMax-Text-01",
+        temperature: "0.4"
+      },
+      yi: {
+        name: "零一万物",
+        baseUrl: "https://api.lingyiwanwu.com/v1",
+        model: "yi-lightning",
+        temperature: "0.4"
+      },
+      custom: {
+        name: "自定义兼容接口",
+        baseUrl: "",
+        model: "",
+        temperature: "0.6"
       }
     };
 
@@ -902,6 +954,25 @@
       statusSymbol.textContent = kind === "ok" ? "✓" : kind === "error" ? "!" : kind === "warn" ? "…" : "·";
       statusTitle.textContent = title;
       statusCopy.textContent = copy;
+    }
+
+    function warnWhenOpenedAsFile() {
+      if (!location.protocol.startsWith("file")) {
+        return;
+      }
+      const localUrl = "http://127.0.0.1:8765/";
+      setStatus("warn", "请用 BAT 启动", "当前是直接打开 HTML。请双击“启动实训报告网页.bat”，然后访问 http://127.0.0.1:8765/。");
+      log("当前是 file:// 打开方式。正在尝试检测本地服务，如果服务已启动会自动跳转。");
+      fetch(`${localUrl}health`, { cache: "no-store" })
+        .then(response => response.json())
+        .then(result => {
+          if (result.ok) {
+            location.replace(localUrl);
+          }
+        })
+        .catch(() => {
+          serverState.textContent = "请双击 BAT 启动";
+        });
     }
 
     function addFiles(fileListLike) {
@@ -1165,7 +1236,9 @@
       aiChatState.textContent = "正在检测全部通道...";
       log("正在对所有 API 预设做真实网络通道检测……");
       try {
-        const presets = Object.entries(aiPresets).map(([id, preset]) => ({ id, ...preset }));
+        const presets = Object.entries(aiPresets)
+          .map(([id, preset]) => ({ id, ...preset }))
+          .filter(preset => preset.baseUrl);
         const response = await fetch(`${apiBase}/probe-ai-routes`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1446,16 +1519,19 @@
     sendAiBtn.addEventListener("click", sendAiMessage);
 
     renderFiles();
+    warnWhenOpenedAsFile();
     checkServer();
     refreshAiEnvStatus();
     deepseekPresetBtn.addEventListener("click", () => {
       const preset = aiPresets[aiProviderPreset.value] || aiPresets.deepseek;
       document.getElementById("aiEnabled").checked = true;
       document.getElementById("aiBox").classList.add("show");
-      document.getElementById("aiBaseUrl").value = preset.baseUrl;
-      document.getElementById("aiModel").value = preset.model;
+      if (preset.baseUrl) document.getElementById("aiBaseUrl").value = preset.baseUrl;
+      if (preset.model) document.getElementById("aiModel").value = preset.model;
       document.getElementById("aiTemperature").value = preset.temperature;
-      aiAnswer.textContent = `已套用 ${preset.name}：\nAPI 地址：${preset.baseUrl}\n模型：${preset.model}\n温度：${preset.temperature}\n现在把你的 API Key 粘贴到“API Key（隐藏输入）”里即可。`;
+      aiAnswer.textContent = preset.baseUrl
+        ? `已套用 ${preset.name}：\nAPI 地址：${preset.baseUrl}\n模型：${preset.model}\n温度：${preset.temperature}\n现在把你的 API Key 粘贴到“API Key（隐藏输入）”里即可。`
+        : "已切换到自定义兼容接口：请填写 API 地址、模型名称和 API Key。";
       aiAnswer.classList.add("show");
       aiError.classList.remove("show");
       log(`已套用 ${preset.name} 接口预设。请在隐藏输入框里填写 API Key，或留空使用 .env。`);

@@ -49,6 +49,9 @@ AI_PROVIDER_PRESETS = [
     {"id": "qwen", "name": "通义千问", "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-plus"},
     {"id": "zhipu", "name": "智谱清言", "baseUrl": "https://open.bigmodel.cn/api/paas/v4", "model": "glm-4-flash"},
     {"id": "siliconflow", "name": "硅基流动", "baseUrl": "https://api.siliconflow.cn/v1", "model": "Qwen/Qwen2.5-7B-Instruct"},
+    {"id": "doubao", "name": "豆包/火山方舟", "baseUrl": "https://ark.cn-beijing.volces.com/api/v3", "model": "doubao-seed-1-6-flash-250615"},
+    {"id": "minimax", "name": "MiniMax", "baseUrl": "https://api.minimax.chat/v1", "model": "MiniMax-Text-01"},
+    {"id": "yi", "name": "零一万物", "baseUrl": "https://api.lingyiwanwu.com/v1", "model": "yi-lightning"},
 ]
 
 JOBS: dict[str, tuple[Path, str]] = {}
