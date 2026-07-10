@@ -23,6 +23,8 @@ from http import HTTPStatus
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from types import SimpleNamespace
+from urllib import error as url_error
+from urllib import request as url_request
 from urllib.parse import parse_qs, urlparse
 
 
@@ -41,6 +43,14 @@ AI_ENV_KEYS = [
     "AI_TEMPERATURE",
     "AI_TIMEOUT",
     "AI_PROXY_URL",
+]
+SKY_AGENT_ENV_KEYS = [
+    "SKY_AGENT_BASE_URL",
+    "SKY_AGENT_API_KEY",
+    "SKY_AGENT_MODEL",
+    "SKY_AGENT_TEMPERATURE",
+    "SKY_AGENT_TIMEOUT",
+    "SKY_AGENT_PROXY_URL",
 ]
 AI_PROVIDER_PRESETS = [
     {"id": "deepseek", "name": "DeepSeek", "baseUrl": "https://api.deepseek.com", "model": "deepseek-chat"},
@@ -90,9 +100,36 @@ def main() -> int:
     parser.add_argument("--no-browser", action="store_true", help="只启动服务，不自动打开浏览器。")
     args = parser.parse_args()
 
-    ensure_runtime()
-    server = ThreadingHTTPServer((args.host, args.port), ReportWebHandler)
     url = f"http://{args.host}:{args.port}"
+    try:
+        ensure_runtime()
+        server = ThreadingHTTPServer((args.host, args.port), ReportWebHandler)
+    except ModuleNotFoundError as exc:
+        missing_name = exc.name or str(exc)
+        safe_log("启动失败：当前 Python 缺少依赖模块。")
+        safe_log(f"当前 Python：{sys.executable}")
+        safe_log(f"缺少模块：{missing_name}")
+        safe_log("请运行：python -m pip install -r requirements.txt")
+        safe_log("或者直接双击“启动实训报告网页.bat”，让它自动安装依赖。")
+        return 2
+    except FileNotFoundError as exc:
+        safe_log(f"启动失败：{exc}")
+        safe_log("请确认项目文件没有缺失，尤其是 实训报告生成器.html 和 实训报告生成器.py。")
+        return 2
+    except OSError as exc:
+        if is_port_in_use_error(exc):
+            safe_log(f"端口 {args.port} 已被占用。")
+            if is_existing_report_service(url):
+                safe_log("检测到已有实训报告生成器服务正在运行，将直接打开现有页面。")
+                if not args.no_browser:
+                    webbrowser.open(url)
+                return 0
+            safe_log("解决方法：")
+            safe_log("1. 关闭之前打开的网页服务黑色窗口后重新双击 BAT。")
+            safe_log(f"2. 或者换一个端口启动：python start_report_web.py --port {args.port + 1}")
+            return 2
+        safe_log(f"启动失败：{exc}")
+        return 2
 
     safe_log("实训报告生成器网页端已启动")
     safe_log(f"访问地址：{url}")
@@ -108,6 +145,19 @@ def main() -> int:
     finally:
         server.server_close()
     return 0
+
+
+def is_port_in_use_error(exc: OSError) -> bool:
+    return getattr(exc, "winerror", None) == 10048 or exc.errno in {48, 98}
+
+
+def is_existing_report_service(url: str) -> bool:
+    try:
+        with url_request.urlopen(f"{url}/health", timeout=1.5) as response:
+            payload = json.loads(response.read().decode("utf-8", errors="replace") or "{}")
+        return bool(payload.get("ok"))
+    except (OSError, ValueError, url_error.URLError, json.JSONDecodeError):
+        return False
 
 
 def ensure_runtime() -> None:
@@ -329,6 +379,25 @@ def build_env_ai_config(core, enabled: bool):
     return build_request_ai_config(core, enabled, None)
 
 
+def build_sky_agent_config(core):
+    load_env_file()
+    base_url = os.getenv("SKY_AGENT_BASE_URL", "").strip() or "https://api.deepseek.com"
+    api_key = os.getenv("SKY_AGENT_API_KEY", "").strip()
+    model = os.getenv("SKY_AGENT_MODEL", "").strip() or "deepseek-chat"
+    temperature = os.getenv("SKY_AGENT_TEMPERATURE", "0.5").strip()
+    timeout = os.getenv("SKY_AGENT_TIMEOUT", "60").strip()
+    proxy_url = os.getenv("SKY_AGENT_PROXY_URL", "").strip() or os.getenv("AI_PROXY_URL", "").strip()
+    return core.AIConfig(
+        enabled=True,
+        base_url=base_url,
+        api_key=api_key,
+        model=normalize_provider_model("deepseek", base_url, model),
+        temperature=parse_float(temperature, 0.5),
+        timeout=parse_int(timeout, 60),
+        proxy_url=proxy_url,
+    )
+
+
 class ReportWebHandler(BaseHTTPRequestHandler):
     server_version = "ReportGeneratorWeb/1.0"
 
@@ -366,6 +435,9 @@ class ReportWebHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/chat":
             self.handle_api_chat()
+            return
+        if parsed.path == "/api/sky-agent":
+            self.handle_sky_agent()
             return
         if parsed.path == "/save-ai-config":
             self.handle_save_ai_config()
@@ -476,6 +548,73 @@ class ReportWebHandler(BaseHTTPRequestHandler):
                 }
             )
         except Exception as exc:  # noqa: BLE001 - 前端需要展示 API 中转错误
+            self.send_json(
+                {
+                    "ok": False,
+                    "error": str(exc),
+                    "pythonPath": sys.executable,
+                },
+                status=HTTPStatus.BAD_REQUEST,
+            )
+
+    def handle_sky_agent(self) -> None:
+        try:
+            content_length = int(self.headers.get("Content-Length", "0") or "0")
+            payload = json.loads(self.rfile.read(content_length).decode("utf-8") or "{}")
+            message = str(payload.get("message") or "").strip()
+            if not message:
+                raise ValueError("请输入要发送给 Sky Agent 的内容。")
+
+            core = load_core()
+            ai_config = build_sky_agent_config(core)
+            if not ai_config.api_key:
+                raise ValueError("Sky Agent API Key 未配置。请把 SKY_AGENT_API_KEY 写入本地 .env。")
+
+            history = payload.get("history") if isinstance(payload.get("history"), list) else []
+            context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+            agent_prompt = json.dumps(
+                {
+                    "user_message": message,
+                    "recent_history": history[-8:],
+                    "current_report_context": context,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            raw_answer = core.call_openai_compatible_text(
+                ai_config,
+                agent_prompt,
+                system_prompt=(
+                    "你是右下角的 Sky Agent，是实训报告生成器里的交互式助手。"
+                    "你需要用简洁自然的中文和用户聊天，并把用户关于报告生成方式的想法整理成可执行的生成控制指令。"
+                    "只输出 JSON，不要 Markdown。JSON 格式必须是："
+                    '{"reply":"给用户看的回复","directive":"写入报告生成流程的控制指令","apply":true}。'
+                    "directive 要能直接影响 Word 报告生成，例如写作风格、内容侧重点、代码说明深度、避免事项、和原有 AI 生成器对话时要遵守的要求。"
+                    "如果用户只是普通聊天，也要给出简短 reply，directive 可以为空字符串，apply 为 false。"
+                ),
+            )
+            try:
+                parsed = core.extract_json_object(raw_answer)
+                answer = str(parsed.get("reply") or raw_answer).strip()
+                directive = str(parsed.get("directive") or "").strip()
+                apply_directive = bool(parsed.get("apply", bool(directive)))
+            except Exception:
+                answer = raw_answer.strip()
+                directive = message
+                apply_directive = True
+
+            self.send_json(
+                {
+                    "ok": True,
+                    "answer": answer,
+                    "directive": directive,
+                    "apply": apply_directive,
+                    "model": ai_config.model,
+                    "baseUrl": ai_config.base_url,
+                    "pythonPath": sys.executable,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - Sky Agent 需要把错误反馈给前端
             self.send_json(
                 {
                     "ok": False,
@@ -596,6 +735,8 @@ class ReportWebHandler(BaseHTTPRequestHandler):
         self.send_cors_headers()
         self.send_header("Content-Type", content_type or mimetypes.guess_type(path.name)[0] or "application/octet-stream")
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store, max-age=0")
+        self.send_header("Pragma", "no-cache")
         self.end_headers()
         self.wfile.write(data)
 
@@ -711,6 +852,14 @@ def generate_report(form: MultipartForm, sources: list[Path], output_path: Path,
         save_ai_config_from_values(request_ai_values, require_api_key=False)
     ai_config = build_request_ai_config(core, enabled=get_bool(form, "aiEnabled"), values=request_ai_values)
     personal_note = get_form_value(form, "personalNote")
+    sky_agent_directive = get_form_value(form, "skyAgentDirective")
+    if sky_agent_directive:
+        personal_note = "\n".join(
+            part for part in [
+                personal_note.strip(),
+                f"Sky Agent 生成控制指令：{sky_agent_directive.strip()}",
+            ] if part
+        )
     source_groups = core.group_sources_by_day(sources)
     variation_seed = f"{output_path.name}-{uuid.uuid4().hex}"
     comparison_rows = []

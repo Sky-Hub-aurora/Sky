@@ -1,5 +1,8 @@
 @echo off
 setlocal EnableExtensions
+chcp 65001 >nul 2>nul
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
 cd /d "%~dp0"
 
 set "APP=start_report_web.py"
@@ -43,6 +46,11 @@ if not exist "%REQ%" (
 )
 
 echo Installing missing modules for the first available Python...
+call :RUN_PIP --version >nul 2>nul
+if errorlevel 1 (
+    echo pip is not ready. Trying to enable pip...
+    call :RUN_ENSUREPIP
+)
 call :RUN_PIP install -r "%REQ%"
 if errorlevel 1 (
     echo Dependency installation failed.
@@ -105,6 +113,8 @@ if defined RUN_KIND exit /b
 set "CAND_CMD=%~1"
 where "%CAND_CMD%" >nul 2>nul
 if errorlevel 1 exit /b
+%CAND_CMD% -c "import sys" >nul 2>nul
+if errorlevel 1 exit /b
 if not defined INSTALL_KIND (
     set "INSTALL_KIND=CMD"
     set "INSTALL_EXE=%CAND_CMD%"
@@ -125,6 +135,16 @@ if /I "%INSTALL_KIND%"=="EXE" (
     py %INSTALL_ARGS% -m pip %*
 ) else (
     %INSTALL_EXE% -m pip %*
+)
+exit /b %ERRORLEVEL%
+
+:RUN_ENSUREPIP
+if /I "%INSTALL_KIND%"=="EXE" (
+    "%INSTALL_EXE%" -m ensurepip --upgrade
+) else if /I "%INSTALL_KIND%"=="PY" (
+    py %INSTALL_ARGS% -m ensurepip --upgrade
+) else (
+    %INSTALL_EXE% -m ensurepip --upgrade
 )
 exit /b %ERRORLEVEL%
 

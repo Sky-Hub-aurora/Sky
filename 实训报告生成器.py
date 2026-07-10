@@ -2131,14 +2131,16 @@ def extract_explicit_tasks(text: str) -> list[TaskItem]:
     current_title = ""
     current_lines: list[str] = []
     in_exercise = False
+    current_inline_task = False
 
     def flush_current() -> None:
-        nonlocal current_title, current_lines
+        nonlocal current_title, current_lines, current_inline_task
         if current_title:
             requirement = " ".join(item.strip() for item in current_lines if item.strip())
             tasks.append(build_task(current_title, requirement or current_title))
         current_title = ""
         current_lines = []
+        current_inline_task = False
 
     for raw_line in lines:
         line = raw_line.strip()
@@ -2151,11 +2153,17 @@ def extract_explicit_tasks(text: str) -> list[TaskItem]:
             in_exercise = True
             current_title = infer_task_title(direct_task.group(1))
             current_lines = [direct_task.group(1)]
+            current_inline_task = True
             continue
 
         if re.match(rf"^{EXPLICIT_TASK_PATTERN}\s*(?:\d+|[一二三四五六七八九十]+)?\s*[:：]?$", line):
             in_exercise = True
             flush_current()
+            current_inline_task = False
+            continue
+        if in_exercise and current_inline_task and not is_task_continuation_line(raw_line):
+            flush_current()
+            in_exercise = False
             continue
         if in_exercise and is_non_task_section_line(line):
             flush_current()
@@ -2170,7 +2178,11 @@ def extract_explicit_tasks(text: str) -> list[TaskItem]:
                 current_title = infer_task_title(match.group(1))
                 current_lines = [match.group(1)]
             else:
-                current_lines.append(line)
+                if not current_title:
+                    current_title = infer_task_title(line)
+                    current_lines = [line]
+                else:
+                    current_lines.append(line)
 
     flush_current()
     return tasks
@@ -2193,7 +2205,7 @@ def extract_code_related_tasks(text: str) -> list[TaskItem]:
             for topic in parallel_topics:
                 tasks.append(build_code_topic_task(topic, line))
             remainder = remove_parallel_topic_words(line)
-            if is_code_related_line(remainder):
+            if is_non_parallel_code_remainder(remainder):
                 tasks.append(build_code_line_task(remainder))
             continue
 
@@ -2277,6 +2289,17 @@ def is_explicit_task_marker_line(line: str) -> bool:
     return bool(re.match(rf"^{EXPLICIT_TASK_PATTERN}\s*(?:\d+|[一二三四五六七八九十]+)?\s*[:：]?$", line.strip()))
 
 
+def is_task_continuation_line(raw_line: str) -> bool:
+    line = raw_line.strip()
+    if not line:
+        return False
+    if raw_line.startswith((" ", "\t")):
+        return True
+    if re.match(r"^(?:[（(]?(?:\d+|[一二三四五六七八九十]+)[）).、．]|[-*])\s*", line):
+        return True
+    return bool(re.match(r"^(?:代码|要求|步骤|说明|输入|输出|实现|完成|运行|调试|提示)\s*[:：]", line))
+
+
 def is_non_task_section_line(line: str) -> bool:
     return bool(re.match(r"^(?:课程目标|课程内容|课程内容详情|知识点|课堂内容|学习内容|提交要求|报告要求)\s*[:：]", line.strip()))
 
@@ -2285,9 +2308,16 @@ def extract_parallel_code_topics(line: str) -> list[str]:
     lowered = line.lower()
     topics: list[str] = []
     for canonical, aliases in PARALLEL_CODE_TOPIC_ALIASES:
-        if any(alias.lower() in lowered for alias in aliases):
+        if any(code_topic_alias_in_text(alias, lowered) for alias in aliases):
             topics.append(canonical)
     return unique_keep_order(topics)
+
+
+def code_topic_alias_in_text(alias: str, lowered_text: str) -> bool:
+    alias_lower = alias.lower()
+    if re.fullmatch(r"[A-Za-z_]+", alias_lower):
+        return bool(re.search(rf"\b{re.escape(alias_lower)}\b", lowered_text))
+    return alias_lower in lowered_text
 
 
 def remove_parallel_topic_words(line: str) -> str:
@@ -2300,6 +2330,15 @@ def remove_parallel_topic_words(line: str) -> str:
                 result = result.replace(alias, "")
     result = re.sub(r"[、,，/]+", "，", result)
     return cleanup_requirement(result)
+
+
+def is_non_parallel_code_remainder(text: str) -> bool:
+    lowered = text.lower()
+    if any(keyword in lowered for keyword in PYTHON_CODE_KEYWORDS):
+        return True
+    return any(action in text for action in CODE_ACTION_KEYWORDS) and (
+        "Python" in text or "python" in lowered or "函数" in text or "变量" in text or "字符串" in text or "数据类型" in text
+    )
 
 
 def build_code_topic_task(topic: str, source_line: str) -> TaskItem:
@@ -3414,6 +3453,18 @@ def infer_day_title(source: Path, text: str, topics: list[str]) -> str:
 def infer_task_title(requirement: str) -> str:
     text = cleanup_requirement(requirement)
     lowered = text.lower()
+    if "plt.bar" in lowered or "bar(" in lowered:
+        return "柱状图生成"
+    if "plt.plot" in lowered or "plot(" in lowered:
+        return "折线图生成"
+    if "plt.pie" in lowered or "pie(" in lowered:
+        return "饼图生成"
+    if "plt.scatter" in lowered or "scatter(" in lowered:
+        return "散点图生成"
+    if "plt.hist" in lowered or "hist(" in lowered:
+        return "直方图生成"
+    if "plt.boxplot" in lowered or "boxplot(" in lowered:
+        return "箱线图生成"
     if "柱状图" in text or "条形图" in text:
         return "柱状图生成"
     if "折线图" in text or "曲线图" in text:
